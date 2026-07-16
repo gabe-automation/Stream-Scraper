@@ -1,11 +1,13 @@
 import type { Request, Response, NextFunction } from "express";
-import { getAuth } from "@clerk/express";
+import { getAuth, createClerkClient } from "@clerk/express";
 import { db, usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 export interface AuthRequest extends Request {
   dbUser?: typeof usersTable.$inferSelect;
 }
+
+const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
 export const requireAuth = async (
   req: AuthRequest,
@@ -24,18 +26,20 @@ export const requireAuth = async (
   });
 
   if (!user) {
-    // Auto-create user record on first API call
-    const clerkUser = auth.sessionClaims as Record<string, unknown>;
+    // Fetch real user data from Clerk backend API
+    const clerkUser = await clerk.users.getUser(auth.userId);
     const email =
-      (clerkUser?.email as string) ||
+      clerkUser.emailAddresses[0]?.emailAddress ||
       `${auth.userId}@streamvault.local`;
-    const name = (clerkUser?.name as string) || email.split("@")[0];
-    const avatarUrl = (clerkUser?.picture as string) || null;
+    const name =
+      [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" ") ||
+      email.split("@")[0];
+    const avatarUrl = clerkUser.imageUrl || null;
 
     // Bootstrap: if this email matches ADMIN_EMAIL, make them admin + approved
     const adminEmail = process.env.ADMIN_EMAIL?.toLowerCase().trim();
     const isBootstrapAdmin =
-      adminEmail && email.toLowerCase().trim() === adminEmail;
+      !!adminEmail && email.toLowerCase().trim() === adminEmail;
 
     const [created] = await db
       .insert(usersTable)
