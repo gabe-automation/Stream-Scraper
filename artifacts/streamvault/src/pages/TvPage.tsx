@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
-import { Loader2, PlayCircle, Users, Clock, Calendar, Star, X, ChevronDown } from "lucide-react";
+import { Loader2, PlayCircle, Users, Clock, Calendar, Star, ChevronDown } from "lucide-react";
 import { 
-  useGetTvShow, 
-  useGetEmbedUrl,
+  useGetTvShow,
   useCreateRoom
 } from "@workspace/api-client-react";
 import { withAuthGuard } from "../components/layout/withAuthGuard";
+import { VideoPlayer } from "../components/VideoPlayer";
 
 function TvPageContent({ params }: { params: { id: string } }) {
   const tvId = params.id;
@@ -17,10 +17,6 @@ function TvPageContent({ params }: { params: { id: string } }) {
   
   const { data: tvShow, isLoading } = useGetTvShow(tvId, {
     query: { enabled: !!tvId }
-  });
-
-  const { data: embedData } = useGetEmbedUrl({ type: 'tv', id: tvId, season: selectedSeason, episode: selectedEpisode }, {
-    query: { enabled: showPlayer && !!tvId }
   });
 
   const createRoomMutation = useCreateRoom();
@@ -72,31 +68,16 @@ function TvPageContent({ params }: { params: { id: string } }) {
 
   return (
     <div className="relative min-h-screen pb-20">
-      {/* Player Modal */}
+      {/* Player */}
       {showPlayer && (
-        <div className="fixed inset-0 z-[100] bg-black flex flex-col">
-          <div className="absolute top-4 right-4 z-10 flex gap-2">
-             <div className="bg-black/80 px-4 py-2 rounded-full text-foreground/80 font-medium text-sm backdrop-blur-md border border-border/30">
-               S{selectedSeason} E{selectedEpisode}
-             </div>
-            <button onClick={() => setShowPlayer(false)} className="p-2 bg-black/50 text-white rounded-full hover:bg-black/80 transition-colors border border-border/30 backdrop-blur-md">
-              <X className="w-6 h-6" />
-            </button>
-          </div>
-          {embedData ? (
-            <iframe
-              src={embedData.embedUrl}
-              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-              allowFullScreen
-              referrerPolicy="origin"
-              className="w-full h-full border-0"
-            />
-          ) : (
-            <div className="flex-1 flex items-center justify-center">
-              <Loader2 className="w-8 h-8 text-primary animate-spin" />
-            </div>
-          )}
-        </div>
+        <VideoPlayer
+          type="tv"
+          id={tvId}
+          season={selectedSeason}
+          episode={selectedEpisode}
+          label={`${tvShow.title} · S${selectedSeason} E${selectedEpisode}`}
+          onClose={() => setShowPlayer(false)}
+        />
       )}
 
       {/* Hero Section */}

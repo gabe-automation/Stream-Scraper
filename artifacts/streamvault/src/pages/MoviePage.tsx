@@ -1,15 +1,12 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
-import { Loader2, PlayCircle, Plus, Users, Clock, Calendar, Star, X } from "lucide-react";
+import { Loader2, PlayCircle, Plus, Users, Clock, Calendar, Star } from "lucide-react";
 import { 
-  useGetMovie, 
-  useGetEmbedUrl,
+  useGetMovie,
   useCreateRoom,
-  ContentDetail,
-  GetEmbedUrlType,
-  RoomInputContentType
 } from "@workspace/api-client-react";
 import { withAuthGuard } from "../components/layout/withAuthGuard";
+import { VideoPlayer } from "../components/VideoPlayer";
 
 function MoviePageContent({ params }: { params: { id: string } }) {
   const movieId = params.id;
@@ -18,10 +15,6 @@ function MoviePageContent({ params }: { params: { id: string } }) {
   
   const { data: movie, isLoading } = useGetMovie(movieId, {
     query: { enabled: !!movieId }
-  });
-
-  const { data: embedData } = useGetEmbedUrl({ type: 'movie', id: movieId }, {
-    query: { enabled: showPlayer && !!movieId }
   });
 
   const createRoomMutation = useCreateRoom();
@@ -62,28 +55,14 @@ function MoviePageContent({ params }: { params: { id: string } }) {
 
   return (
     <div className="relative min-h-screen pb-20">
-      {/* Player Modal */}
+      {/* Player */}
       {showPlayer && (
-        <div className="fixed inset-0 z-[100] bg-black flex flex-col">
-          <div className="absolute top-4 right-4 z-10">
-            <button onClick={() => setShowPlayer(false)} className="p-2 bg-black/50 text-white rounded-full hover:bg-black/80 transition-colors">
-              <X className="w-6 h-6" />
-            </button>
-          </div>
-          {embedData ? (
-            <iframe
-              src={embedData.embedUrl}
-              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-              allowFullScreen
-              referrerPolicy="origin"
-              className="w-full h-full border-0"
-            />
-          ) : (
-            <div className="flex-1 flex items-center justify-center">
-              <Loader2 className="w-8 h-8 text-primary animate-spin" />
-            </div>
-          )}
-        </div>
+        <VideoPlayer
+          type="movie"
+          id={movieId}
+          label={movie.title}
+          onClose={() => setShowPlayer(false)}
+        />
       )}
 
       {/* Hero Section */}
