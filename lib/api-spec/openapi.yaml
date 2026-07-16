@@ -3,20 +3,28 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: StreamVault API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: users
+    description: User management
+  - name: invites
+    description: Invite management
+  - name: content
+    description: Movie & TV content
+  - name: rooms
+    description: Watch together rooms
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +32,442 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  # ── Users ────────────────────────────────────────────────────────────────────
+  /users/me:
+    get:
+      operationId: getMe
+      tags: [users]
+      summary: Get current user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Unauthorized
+
+    patch:
+      operationId: updateMe
+      tags: [users]
+      summary: Update current user profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserProfileUpdate"
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      summary: Admin — list all users
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+        - in: query
+          name: limit
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserList"
+        "403":
+          description: Forbidden
+
+  /users/{id}:
+    patch:
+      operationId: updateUser
+      tags: [users]
+      summary: Admin — update user role or approval
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserAdminUpdate"
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "403":
+          description: Forbidden
+
+    delete:
+      operationId: deleteUser
+      tags: [users]
+      summary: Admin — remove a user
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "403":
+          description: Forbidden
+
+  # ── Invites ────────────────────────────────────────────────────────────────
+  /invites:
+    get:
+      operationId: listInvites
+      tags: [invites]
+      summary: Admin — list all invites
+      responses:
+        "200":
+          description: List of invites
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invite"
+
+    post:
+      operationId: createInvite
+      tags: [invites]
+      summary: Admin — create an invite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteInput"
+      responses:
+        "201":
+          description: Created invite
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+
+  /invites/{code}:
+    get:
+      operationId: getInvite
+      tags: [invites]
+      summary: Check if an invite code is valid
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Invite info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invite"
+        "404":
+          description: Not found
+
+    delete:
+      operationId: deleteInvite
+      tags: [invites]
+      summary: Admin — revoke an invite
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+
+  /invites/{code}/accept:
+    post:
+      operationId: acceptInvite
+      tags: [invites]
+      summary: Accept an invite to gain access
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Access granted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Invalid or expired invite
+
+  # ── Content ────────────────────────────────────────────────────────────────
+  /content/trending:
+    get:
+      operationId: getTrending
+      tags: [content]
+      summary: Trending movies and TV shows
+      parameters:
+        - in: query
+          name: type
+          schema:
+            type: string
+            enum: [all, movie, tv]
+      responses:
+        "200":
+          description: Trending content
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentItem"
+
+  /content/popular:
+    get:
+      operationId: getPopular
+      tags: [content]
+      summary: Popular movies and TV shows
+      parameters:
+        - in: query
+          name: type
+          schema:
+            type: string
+            enum: [movie, tv]
+      responses:
+        "200":
+          description: Popular content
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ContentItem"
+
+  /content/search:
+    get:
+      operationId: searchContent
+      tags: [content]
+      summary: Search movies and TV shows
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: type
+          schema:
+            type: string
+            enum: [all, movie, tv]
+        - in: query
+          name: page
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResults"
+
+  /content/movie/{id}:
+    get:
+      operationId: getMovie
+      tags: [content]
+      summary: Movie details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Movie details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentDetail"
+
+  /content/tv/{id}:
+    get:
+      operationId: getTvShow
+      tags: [content]
+      summary: TV show details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: TV show details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentDetail"
+
+  /content/embed:
+    get:
+      operationId: getEmbedUrl
+      tags: [content]
+      summary: Get embed player URL for content
+      parameters:
+        - in: query
+          name: type
+          required: true
+          schema:
+            type: string
+            enum: [movie, tv]
+        - in: query
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: season
+          schema:
+            type: integer
+        - in: query
+          name: episode
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Embed URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbedUrlResponse"
+
+  # ── Watch Rooms ────────────────────────────────────────────────────────────
+  /rooms:
+    get:
+      operationId: listRooms
+      tags: [rooms]
+      summary: List active watch rooms
+      responses:
+        "200":
+          description: Active rooms
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Room"
+
+    post:
+      operationId: createRoom
+      tags: [rooms]
+      summary: Create a watch room
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomInput"
+      responses:
+        "201":
+          description: Created room
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Room"
+
+  /rooms/{id}:
+    get:
+      operationId: getRoom
+      tags: [rooms]
+      summary: Get room details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Room details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Room"
+        "404":
+          description: Not found
+
+    delete:
+      operationId: deleteRoom
+      tags: [rooms]
+      summary: Close a watch room
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Closed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+
+  /rooms/{id}/messages:
+    get:
+      operationId: getRoomMessages
+      tags: [rooms]
+      summary: Get chat history for a room
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Chat messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatMessage"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +475,294 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+      required: [message]
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        clerkId:
+          type: string
+        email:
+          type: string
+        name:
+          type: string
+        avatarUrl:
+          type: ["string", "null"]
+        role:
+          type: string
+          enum: [admin, user]
+        isApproved:
+          type: boolean
+        createdAt:
+          type: string
+      required: [id, clerkId, email, name, role, isApproved, createdAt]
+
+    UserList:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+        total:
+          type: integer
+      required: [users, total]
+
+    UserProfileUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+
+    UserAdminUpdate:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [admin, user]
+        isApproved:
+          type: boolean
+
+    Invite:
+      type: object
+      properties:
+        id:
+          type: string
+        code:
+          type: string
+        email:
+          type: ["string", "null"]
+        note:
+          type: ["string", "null"]
+        createdBy:
+          type: string
+        usedBy:
+          type: ["string", "null"]
+        usedAt:
+          type: ["string", "null"]
+        expiresAt:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+      required: [id, code, createdBy, createdAt]
+
+    InviteInput:
+      type: object
+      properties:
+        email:
+          type: string
+        note:
+          type: string
+        expiresAt:
+          type: string
+
+    ContentItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        tmdbId:
+          type: integer
+        type:
+          type: string
+          enum: [movie, tv]
+        title:
+          type: string
+        posterPath:
+          type: ["string", "null"]
+        backdropPath:
+          type: ["string", "null"]
+        overview:
+          type: string
+        releaseDate:
+          type: ["string", "null"]
+        rating:
+          type: number
+        voteCount:
+          type: integer
+        genres:
+          type: array
+          items:
+            type: string
+      required: [id, tmdbId, type, title, overview, rating, voteCount, genres]
+
+    ContentDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        tmdbId:
+          type: integer
+        type:
+          type: string
+          enum: [movie, tv]
+        title:
+          type: string
+        posterPath:
+          type: ["string", "null"]
+        backdropPath:
+          type: ["string", "null"]
+        overview:
+          type: string
+        releaseDate:
+          type: ["string", "null"]
+        rating:
+          type: number
+        voteCount:
+          type: integer
+        genres:
+          type: array
+          items:
+            type: string
+        runtime:
+          type: ["integer", "null"]
+        status:
+          type: ["string", "null"]
+        tagline:
+          type: ["string", "null"]
+        seasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/SeasonInfo"
+        cast:
+          type: array
+          items:
+            $ref: "#/components/schemas/CastMember"
+        trailerKey:
+          type: ["string", "null"]
+      required: [id, tmdbId, type, title, overview, rating, voteCount, genres, cast]
+
+    SeasonInfo:
+      type: object
+      properties:
+        seasonNumber:
+          type: integer
+        name:
+          type: string
+        episodeCount:
+          type: integer
+        posterPath:
+          type: ["string", "null"]
+      required: [seasonNumber, name, episodeCount]
+
+    CastMember:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        character:
+          type: string
+        profilePath:
+          type: ["string", "null"]
+      required: [id, name, character]
+
+    EmbedUrlResponse:
+      type: object
+      properties:
+        embedUrl:
+          type: string
+        provider:
+          type: string
+      required: [embedUrl, provider]
+
+    SearchResults:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContentItem"
+        totalResults:
+          type: integer
+        page:
+          type: integer
+        totalPages:
+          type: integer
+      required: [results, totalResults, page, totalPages]
+
+    Room:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        contentType:
+          type: string
+          enum: [movie, tv]
+        contentId:
+          type: string
+        contentTitle:
+          type: string
+        contentPoster:
+          type: ["string", "null"]
+        hostId:
+          type: string
+        hostName:
+          type: string
+        memberCount:
+          type: integer
+        currentTime:
+          type: number
+        isPlaying:
+          type: boolean
+        season:
+          type: ["integer", "null"]
+        episode:
+          type: ["integer", "null"]
+        createdAt:
+          type: string
+      required: [id, name, contentType, contentId, contentTitle, hostId, hostName, memberCount, currentTime, isPlaying, createdAt]
+
+    RoomInput:
+      type: object
+      properties:
+        name:
+          type: string
+        contentType:
+          type: string
+          enum: [movie, tv]
+        contentId:
+          type: string
+        contentTitle:
+          type: string
+        contentPoster:
+          type: string
+        season:
+          type: integer
+        episode:
+          type: integer
+      required: [name, contentType, contentId, contentTitle]
+
+    ChatMessage:
+      type: object
+      properties:
+        id:
+          type: string
+        roomId:
+          type: string
+        userId:
+          type: string
+        userName:
+          type: string
+        userAvatar:
+          type: ["string", "null"]
+        content:
+          type: string
+        type:
+          type: string
+          enum: [text, reaction, system]
+        createdAt:
+          type: string
+      required: [id, roomId, userId, userName, content, type, createdAt]

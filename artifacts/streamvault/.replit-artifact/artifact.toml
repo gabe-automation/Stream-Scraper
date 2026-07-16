@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "StreamVault"
+version = "1.0.0"
+id = "artifacts/streamvault"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23593
+
+[services.development]
+run = "pnpm --filter @workspace/streamvault run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/streamvault", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/streamvault/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23593"
+BASE_PATH = "/"
