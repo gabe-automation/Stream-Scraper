@@ -1,45 +1,49 @@
-# [Project name]
+# StreamVault
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A private, invite-only streaming web app — like Netflix but exclusive. Members stream movies and TV shows, watch together in real-time synchronized rooms, and chat live.
 
-## Run & Operate
+## Architecture
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- **Frontend** (`artifacts/streamvault`): React + Vite, Clerk auth, Socket.io client, simple-peer (WebRTC)
+- **API server** (`artifacts/api-server`): Express 5, Clerk middleware, Socket.io, Drizzle ORM + PostgreSQL
+- **Shared DB** (`lib/db`): Drizzle schema — users, invites, watch_rooms, room_messages
 
-## Stack
+## Key features
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Invite-only access: admin creates invite codes, users redeem them to gain access
+- Content via TMDB API (metadata + posters) + vidsrc.to (video embeds)
+- Watch Together: synchronized playback via Socket.io, live chat, emoji reactions, WebRTC voice/video via simple-peer
+- Admin panel: manage users (approve/promote/remove) and invite codes
 
-## Where things live
+## Environment variables / secrets required
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+| Key | Purpose |
+|-----|---------|
+| `CLERK_SECRET_KEY` | Clerk auth (backend) — auto-set by Replit |
+| `VITE_CLERK_PUBLISHABLE_KEY` | Clerk auth (frontend) — auto-set by Replit |
+| `TMDB_API_KEY` | The Movie Database API key for content metadata |
+| `ADMIN_EMAIL` | Email address that gets auto-promoted to admin on first sign-in |
+| `DATABASE_URL` | PostgreSQL connection — auto-set by Replit |
 
-## Architecture decisions
+## Bootstrap: creating the first admin
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+Set the `ADMIN_EMAIL` environment variable to your email address. The first time you sign in with that email, your account will be automatically approved and given the admin role. From there you can create invite codes for other users via the Admin panel.
 
-## Product
+## Development
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+```bash
+# Push schema changes to DB
+pnpm --filter @workspace/db run push
+
+# Rebuild lib type declarations after schema changes
+pnpm run typecheck:libs
+
+# Typecheck API server
+pnpm --filter @workspace/api-server run typecheck
+```
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Invite-only model: no self-registration; admin creates invite codes
+- vidsrc.to for video embeds (no local video storage)
+- Watch Together: Socket.io sync + WebRTC via simple-peer

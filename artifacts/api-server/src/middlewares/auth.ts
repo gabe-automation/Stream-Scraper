@@ -32,6 +32,11 @@ export const requireAuth = async (
     const name = (clerkUser?.name as string) || email.split("@")[0];
     const avatarUrl = (clerkUser?.picture as string) || null;
 
+    // Bootstrap: if this email matches ADMIN_EMAIL, make them admin + approved
+    const adminEmail = process.env.ADMIN_EMAIL?.toLowerCase().trim();
+    const isBootstrapAdmin =
+      adminEmail && email.toLowerCase().trim() === adminEmail;
+
     const [created] = await db
       .insert(usersTable)
       .values({
@@ -40,8 +45,8 @@ export const requireAuth = async (
         email,
         name,
         avatarUrl,
-        role: "user",
-        isApproved: false,
+        role: isBootstrapAdmin ? "admin" : "user",
+        isApproved: isBootstrapAdmin ? true : false,
       })
       .returning();
     user = created;
