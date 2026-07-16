@@ -36,24 +36,39 @@ export const requireAuth = async (
       email.split("@")[0];
     const avatarUrl = clerkUser.imageUrl || null;
 
-    // Bootstrap: if this email matches ADMIN_EMAIL, make them admin + approved
-    const adminEmail = process.env.ADMIN_EMAIL?.toLowerCase().trim();
-    const isBootstrapAdmin =
-      !!adminEmail && email.toLowerCase().trim() === adminEmail;
+    // Check if a record already exists by email (handles Clerk ID changes)
+    const existingByEmail = await db.query.usersTable.findFirst({
+      where: eq(usersTable.email, email),
+    });
 
-    const [created] = await db
-      .insert(usersTable)
-      .values({
-        id: crypto.randomUUID(),
-        clerkId: auth.userId,
-        email,
-        name,
-        avatarUrl,
-        role: isBootstrapAdmin ? "admin" : "user",
-        isApproved: isBootstrapAdmin ? true : false,
-      })
-      .returning();
-    user = created;
+    if (existingByEmail) {
+      // Update the stale Clerk ID and refresh profile info
+      const [updated] = await db
+        .update(usersTable)
+        .set({ clerkId: auth.userId, name, avatarUrl })
+        .where(eq(usersTable.id, existingByEmail.id))
+        .returning();
+      user = updated;
+    } else {
+      // Bootstrap: if this email matches ADMIN_EMAIL, make them admin + approved
+      const adminEmail = process.env.ADMIN_EMAIL?.toLowerCase().trim();
+      const isBootstrapAdmin =
+        !!adminEmail && email.toLowerCase().trim() === adminEmail;
+
+      const [created] = await db
+        .insert(usersTable)
+        .values({
+          id: crypto.randomUUID(),
+          clerkId: auth.userId,
+          email,
+          name,
+          avatarUrl,
+          role: isBootstrapAdmin ? "admin" : "user",
+          isApproved: isBootstrapAdmin ? true : false,
+        })
+        .returning();
+      user = created;
+    }
   }
 
   req.dbUser = user;

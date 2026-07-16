@@ -84,9 +84,11 @@ function TvPageContent({ params }: { params: { id: string } }) {
             </button>
           </div>
           {embedData ? (
-            <iframe 
-              src={embedData.embedUrl} 
-              allowFullScreen 
+            <iframe
+              src={embedData.embedUrl}
+              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+              allowFullScreen
+              referrerPolicy="origin"
               className="w-full h-full border-0"
             />
           ) : (

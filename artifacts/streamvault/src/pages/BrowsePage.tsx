@@ -1,81 +1,148 @@
 import { useState, useEffect } from "react";
 import { Link } from "wouter";
-import { Search, Loader2, PlayCircle, Info } from "lucide-react";
-import { 
-  useGetTrending, 
-  useGetPopular, 
+import { Search, Loader2, Play, Info, X, TrendingUp, Tv, Film } from "lucide-react";
+import {
+  useGetTrending,
+  useGetPopular,
   useSearchContent,
-  ContentItem 
+  ContentItem,
 } from "@workspace/api-client-react";
 import { withAuthGuard } from "../components/layout/withAuthGuard";
 import { ContentCard, ContentRow } from "../components/ContentCard";
 import { useDebounce } from "../hooks/use-debounce";
 
+// ─── Hero Carousel ────────────────────────────────────────────────────────────
+
 function HeroCarousel({ items, isLoading }: { items?: ContentItem[]; isLoading?: boolean }) {
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [transitioning, setTransitioning] = useState(false);
 
   useEffect(() => {
     if (!items || items.length === 0) return;
     const interval = setInterval(() => {
-      setCurrentIndex((prev) => (prev + 1) % Math.min(items.length, 5));
-    }, 8000);
+      setTransitioning(true);
+      setTimeout(() => {
+        setCurrentIndex((prev) => (prev + 1) % Math.min(items.length, 6));
+        setTransitioning(false);
+      }, 400);
+    }, 9000);
     return () => clearInterval(interval);
   }, [items]);
 
   if (isLoading) {
-    return <div className="w-full aspect-video md:aspect-[21/9] bg-secondary/30 animate-pulse" />;
+    return (
+      <div className="relative w-full h-[70vh] bg-black overflow-hidden">
+        <div className="w-full h-full bg-white/5 animate-pulse" />
+        <div className="absolute inset-0 bg-gradient-to-t from-background via-background/30 to-transparent" />
+      </div>
+    );
   }
 
   if (!items || items.length === 0) return null;
 
   const item = items[currentIndex];
-  const backdropUrl = item.backdropPath ? `https://image.tmdb.org/t/p/w1280${item.backdropPath}` : '';
+  const backdropUrl = item.backdropPath
+    ? `https://image.tmdb.org/t/p/original${item.backdropPath}`
+    : null;
+  const posterUrl = item.posterPath
+    ? `https://image.tmdb.org/t/p/w500${item.posterPath}`
+    : null;
 
   return (
-    <div className="relative w-full aspect-[4/3] md:aspect-[21/9] bg-black overflow-hidden group">
+    <div className="relative w-full h-[70vh] bg-black overflow-hidden select-none">
+      {/* Backdrop */}
       {backdropUrl && (
-        <img 
+        <img
           key={item.id}
-          src={backdropUrl} 
-          alt={item.title} 
-          className="w-full h-full object-cover opacity-60 transition-transform duration-10000 ease-linear scale-105 group-hover:scale-110" 
+          src={backdropUrl}
+          alt={item.title}
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ${
+            transitioning ? "opacity-0" : "opacity-50"
+          }`}
         />
       )}
-      <div className="absolute inset-0 bg-gradient-to-t from-background via-background/40 to-transparent" />
-      <div className="absolute inset-0 bg-gradient-to-r from-background via-background/60 to-transparent" />
-      
-      <div className="absolute bottom-0 left-0 p-6 md:p-12 lg:px-16 w-full md:w-2/3 flex flex-col justify-end">
-        <div className="flex items-center gap-2 mb-3">
-          <span className="px-2 py-0.5 text-xs font-bold bg-primary text-primary-foreground rounded uppercase tracking-wider">
-            Trending {item.type === 'tv' ? 'TV' : 'Movie'}
+
+      {/* Gradient overlays */}
+      <div className="absolute inset-0 bg-gradient-to-t from-background via-background/50 to-transparent" />
+      <div className="absolute inset-0 bg-gradient-to-r from-background via-background/40 to-transparent" />
+
+      {/* Content */}
+      <div
+        className={`absolute bottom-0 left-0 px-6 md:px-12 lg:px-16 pb-16 w-full md:w-3/5 lg:w-1/2 transition-all duration-500 ${
+          transitioning ? "opacity-0 translate-y-2" : "opacity-100 translate-y-0"
+        }`}
+      >
+        {/* Meta row */}
+        <div className="flex items-center gap-3 mb-4">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary/20 border border-primary/40 text-primary text-xs font-bold uppercase tracking-widest">
+            <TrendingUp className="w-3 h-3" />
+            Trending
           </span>
-          <span className="text-primary font-bold">★ {item.rating.toFixed(1)}</span>
+          <span className="text-white/50 text-sm font-medium">
+            {item.type === "tv" ? "Series" : "Film"}
+          </span>
+          {item.rating > 0 && (
+            <span className="text-primary font-bold text-sm">
+              ★ {item.rating.toFixed(1)}
+            </span>
+          )}
         </div>
-        <h2 className="text-3xl md:text-5xl font-bold tracking-tighter text-foreground mb-4 text-shadow-lg leading-tight">
+
+        {/* Title */}
+        <h2 className="text-4xl md:text-6xl font-black tracking-tight text-white mb-3 leading-[1.05]">
           {item.title}
         </h2>
-        <p className="text-muted-foreground text-sm md:text-base line-clamp-3 mb-6 max-w-xl text-shadow">
+
+        {/* Overview */}
+        <p className="text-white/60 text-sm md:text-base leading-relaxed line-clamp-3 mb-7 max-w-lg">
           {item.overview}
         </p>
+
+        {/* Actions */}
         <div className="flex gap-3">
-          <Link href={`/${item.type}/${item.id}`} className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-foreground text-background font-bold rounded-lg hover:bg-foreground/90 transition-colors">
-            <PlayCircle className="w-5 h-5" />
+          <Link
+            href={`/${item.type}/${item.id}`}
+            className="inline-flex items-center gap-2 px-7 py-3 bg-white text-black font-bold rounded-lg hover:bg-white/90 transition-all shadow-lg hover:shadow-white/20 hover:scale-105 active:scale-95 text-sm"
+          >
+            <Play className="w-4 h-4 fill-black" />
             Watch Now
           </Link>
-          <Link href={`/${item.type}/${item.id}`} className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-secondary/80 backdrop-blur-md text-foreground font-bold rounded-lg hover:bg-secondary transition-colors border border-border/50">
-            <Info className="w-5 h-5" />
+          <Link
+            href={`/${item.type}/${item.id}`}
+            className="inline-flex items-center gap-2 px-7 py-3 bg-white/10 backdrop-blur-md text-white font-bold rounded-lg hover:bg-white/20 transition-all border border-white/20 text-sm"
+          >
+            <Info className="w-4 h-4" />
             More Info
           </Link>
         </div>
       </div>
-      
-      {/* Dots */}
-      <div className="absolute bottom-6 right-6 md:right-12 flex gap-2">
-        {items.slice(0, 5).map((_, idx) => (
-          <button 
-            key={idx} 
-            onClick={() => setCurrentIndex(idx)}
-            className={`w-2 h-2 rounded-full transition-all ${idx === currentIndex ? 'bg-primary w-6' : 'bg-white/30 hover:bg-white/50'}`}
+
+      {/* Poster (desktop) */}
+      {posterUrl && (
+        <div
+          className={`hidden lg:block absolute right-16 bottom-12 w-48 rounded-xl overflow-hidden shadow-2xl shadow-black/60 border border-white/10 transition-all duration-500 ${
+            transitioning ? "opacity-0 translate-y-4" : "opacity-100 translate-y-0"
+          }`}
+        >
+          <img src={posterUrl} alt={item.title} className="w-full h-auto" />
+        </div>
+      )}
+
+      {/* Dot indicators */}
+      <div className="absolute bottom-6 left-6 md:left-12 lg:left-16 flex gap-2">
+        {items.slice(0, 6).map((_, idx) => (
+          <button
+            key={idx}
+            onClick={() => {
+              setTransitioning(true);
+              setTimeout(() => {
+                setCurrentIndex(idx);
+                setTransitioning(false);
+              }, 200);
+            }}
+            className={`h-1 rounded-full transition-all duration-300 ${
+              idx === currentIndex ? "w-8 bg-primary" : "w-2 bg-white/25 hover:bg-white/50"
+            }`}
           />
         ))}
       </div>
@@ -83,70 +150,153 @@ function HeroCarousel({ items, isLoading }: { items?: ContentItem[]; isLoading?:
   );
 }
 
+// ─── Category Filter ──────────────────────────────────────────────────────────
+
+type FilterTab = "all" | "movie" | "tv";
+
+const filterTabs: { id: FilterTab; label: string; icon: React.ReactNode }[] = [
+  { id: "all", label: "All", icon: <TrendingUp className="w-3.5 h-3.5" /> },
+  { id: "movie", label: "Movies", icon: <Film className="w-3.5 h-3.5" /> },
+  { id: "tv", label: "TV Shows", icon: <Tv className="w-3.5 h-3.5" /> },
+];
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
 function BrowsePageContent() {
   const [query, setQuery] = useState("");
-  const debouncedQuery = useDebounce(query, 500);
+  const [filter, setFilter] = useState<FilterTab>("all");
+  const debouncedQuery = useDebounce(query, 400);
 
-  // Queries
-  const { data: trendingAll, isLoading: loadingTrendingAll } = useGetTrending({ type: 'all' });
-  const { data: trendingMovies, isLoading: loadingTrendingMovies } = useGetTrending({ type: 'movie' });
-  const { data: trendingTv, isLoading: loadingTrendingTv } = useGetTrending({ type: 'tv' });
-  const { data: popularMovies, isLoading: loadingPopularMovies } = useGetPopular({ type: 'movie' });
-  const { data: popularTv, isLoading: loadingPopularTv } = useGetPopular({ type: 'tv' });
+  const { data: trendingAll, isLoading: loadingTrendingAll } = useGetTrending({ type: "all" });
+  const { data: trendingMovies, isLoading: loadingTrendingMovies } = useGetTrending({ type: "movie" });
+  const { data: trendingTv, isLoading: loadingTrendingTv } = useGetTrending({ type: "tv" });
+  const { data: popularMovies, isLoading: loadingPopularMovies } = useGetPopular({ type: "movie" });
+  const { data: popularTv, isLoading: loadingPopularTv } = useGetPopular({ type: "tv" });
 
-  const { data: searchResults, isLoading: loadingSearch, isFetching: isFetchingSearch } = useSearchContent({ q: debouncedQuery, type: 'all' }, {
-    query: { enabled: debouncedQuery.length > 2 }
-  });
+  const { data: searchResults, isLoading: loadingSearch, isFetching: isFetchingSearch } =
+    useSearchContent(
+      { q: debouncedQuery, type: filter === "all" ? "all" : filter },
+      { query: { enabled: debouncedQuery.length > 1 } },
+    );
 
-  const isSearching = debouncedQuery.length > 2;
+  const isSearching = debouncedQuery.length > 1;
+
+  // Filter helper for the content rows
+  const showMovies = filter === "all" || filter === "movie";
+  const showTv = filter === "all" || filter === "tv";
 
   return (
-    <div className="flex flex-col w-full pb-20">
-      {/* Search Header */}
-      <div className="sticky top-16 z-40 bg-background/95 backdrop-blur-md border-b border-border/50 p-4 lg:px-8">
-        <div className="relative max-w-2xl mx-auto">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-          <input 
-            type="text" 
-            placeholder="Search movies, TV shows..."
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="w-full bg-input/50 border border-border rounded-full py-3 pl-12 pr-4 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-all"
-          />
-          {isFetchingSearch && (
-            <Loader2 className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-primary animate-spin" />
-          )}
+    <div className="flex flex-col w-full pb-24">
+      {/* Sticky header: search + filter */}
+      <div className="sticky top-16 z-40 bg-background/95 backdrop-blur-md border-b border-white/5">
+        {/* Search bar */}
+        <div className="px-4 lg:px-8 pt-4 pb-3">
+          <div className="relative max-w-xl mx-auto lg:mx-0">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
+            <input
+              type="text"
+              placeholder="Search movies, series..."
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="w-full bg-white/5 border border-white/10 rounded-full py-2.5 pl-11 pr-10 text-white placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-primary/60 focus:border-primary/40 transition-all text-sm"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-white/30 hover:text-white/60 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {isFetchingSearch && (
+              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-primary animate-spin" />
+            )}
+          </div>
         </div>
+
+        {/* Filter tabs */}
+        {!isSearching && (
+          <div className="flex gap-1 px-4 lg:px-8 pb-3">
+            {filterTabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setFilter(tab.id)}
+                className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                  filter === tab.id
+                    ? "bg-primary text-primary-foreground shadow-md shadow-primary/30"
+                    : "bg-white/5 text-white/50 hover:bg-white/10 hover:text-white/80 border border-white/10"
+                }`}
+              >
+                {tab.icon}
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
+      {/* ── Search results ── */}
       {isSearching ? (
-        <div className="container mx-auto px-4 lg:px-8 py-8">
-          <h2 className="text-2xl font-bold mb-6">Search Results for "{debouncedQuery}"</h2>
+        <div className="px-4 lg:px-8 py-8">
+          <h2 className="text-xl font-bold text-white/80 mb-6">
+            Results for <span className="text-white">"{debouncedQuery}"</span>
+          </h2>
           {loadingSearch ? (
-            <div className="flex items-center justify-center py-20">
+            <div className="flex items-center justify-center py-24">
               <Loader2 className="w-8 h-8 text-primary animate-spin" />
             </div>
           ) : searchResults?.results && searchResults.results.length > 0 ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 lg:gap-6">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 lg:gap-4">
               {searchResults.results.map((item) => (
                 <ContentCard key={item.id} item={item} />
               ))}
             </div>
           ) : (
-            <div className="text-center py-20 text-muted-foreground">
-              No results found. Try a different term.
+            <div className="flex flex-col items-center justify-center py-24 text-white/30">
+              <Search className="w-12 h-12 mb-4 opacity-30" />
+              <p className="text-lg font-medium">No results found</p>
+              <p className="text-sm mt-1">Try a different title</p>
             </div>
           )}
         </div>
       ) : (
         <>
-          <HeroCarousel items={trendingAll} isLoading={loadingTrendingAll} />
-          
-          <div className="mt-8 space-y-4">
-            <ContentRow title="Trending Movies" items={trendingMovies} isLoading={loadingTrendingMovies} />
-            <ContentRow title="Trending TV Shows" items={trendingTv} isLoading={loadingTrendingTv} />
-            <ContentRow title="Popular Movies" items={popularMovies} isLoading={loadingPopularMovies} />
-            <ContentRow title="Popular TV Shows" items={popularTv} isLoading={loadingPopularTv} />
+          {/* Hero only on "all" tab */}
+          {filter === "all" && (
+            <HeroCarousel items={trendingAll} isLoading={loadingTrendingAll} />
+          )}
+
+          <div className={`mt-6 space-y-2 ${filter !== "all" ? "pt-4" : ""}`}>
+            {showMovies && (
+              <>
+                <ContentRow
+                  title="🔥 Top 10 Movies This Week"
+                  items={trendingMovies?.slice(0, 10)}
+                  isLoading={loadingTrendingMovies}
+                  showRank
+                />
+                <ContentRow
+                  title="Popular Movies"
+                  items={popularMovies}
+                  isLoading={loadingPopularMovies}
+                />
+              </>
+            )}
+            {showTv && (
+              <>
+                <ContentRow
+                  title="🔥 Top 10 TV Shows This Week"
+                  items={trendingTv?.slice(0, 10)}
+                  isLoading={loadingTrendingTv}
+                  showRank
+                />
+                <ContentRow
+                  title="Popular Series"
+                  items={popularTv}
+                  isLoading={loadingPopularTv}
+                />
+              </>
+            )}
           </div>
         </>
       )}
