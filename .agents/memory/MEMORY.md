@@ -1,0 +1,1 @@
+- [StreamVault architecture](streamvault-arch.md) — stack decisions, admin bootstrap, Drizzle/Express 5 params gotcha, schema-change workflow
