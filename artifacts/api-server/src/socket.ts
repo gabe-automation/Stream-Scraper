@@ -76,7 +76,11 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
           name: m.userName,
           userAvatar: m.userAvatar,
         }));
-        socket.emit("room-state", { members: memberList });
+        // Include who is currently on a call so Gabriel can see it immediately
+        const currentCallers = roomCallState.has(roomId)
+          ? Array.from(roomCallState.get(roomId)!.entries()).map(([id, name]) => ({ id, name }))
+          : [];
+        socket.emit("room-state", { members: memberList, callers: currentCallers });
 
         // System message
         try {

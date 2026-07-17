@@ -141,6 +141,9 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
 
+  // Who is currently on a call — visible to everyone in the room, not just callers
+  const [activeCallers, setActiveCallers] = useState<{ id: string; name: string }[]>([]);
+
   useEffect(() => { if (initialMessages) setMessages(initialMessages); }, [initialMessages]);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
@@ -221,6 +224,18 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     }
   }, []);
 
+  // Stable callback refs — keep the socket effect deps to [userId, roomId] only.
+  // Without this, Clerk refreshing the user object creates a new `createPeerConnection`
+  // identity, which tears down the socket mid-call.
+  const addMessageRef = useRef(addMessage);
+  const createPeerRef = useRef(createPeerConnection);
+  const destroyPeerRef = useRef(destroyPeerConnection);
+  const switchToRef = useRef(switchTo);
+  useEffect(() => { addMessageRef.current = addMessage; }, [addMessage]);
+  useEffect(() => { createPeerRef.current = createPeerConnection; }, [createPeerConnection]);
+  useEffect(() => { destroyPeerRef.current = destroyPeerConnection; }, [destroyPeerConnection]);
+  useEffect(() => { switchToRef.current = switchTo; }, [switchTo]);
+
   const joinCall = async (type: 'audio' | 'video') => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -288,9 +303,13 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
   // ---------------------------------------------------------------------
   // Socket connection + event handlers
+  // Socket only tears down when the user ID or room changes — NOT when
+  // callback identities change (Clerk refreshes cause those constantly).
+  // All callbacks are accessed via stable refs.
   // ---------------------------------------------------------------------
+  const userId = user?.id;
   useEffect(() => {
-    if (!user || !roomId) return;
+    if (!userId || !roomId) return;
 
     const s = io({ path: "/ws/socket.io" });
     socketRef.current = s;
@@ -299,23 +318,25 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     s.on("connect", () => {
       s.emit("join-room", {
         roomId,
-        userId: user.id,
-        userName: user.fullName || user.firstName || "Anonymous",
-        userAvatar: user.imageUrl ?? null,
+        userId,
+        userName: user?.fullName || user?.firstName || "Anonymous",
+        userAvatar: user?.imageUrl ?? null,
       });
     });
 
-    // Full member list on join — initialises the participants panel
-    s.on("room-state", ({ members }: { members: { id: string; name: string; userAvatar: string | null }[] }) => {
-      setParticipants(members.filter((m) => m.id !== user.id));
+    // Full member list on join — also includes who's on a call right now
+    s.on("room-state", ({ members, callers = [] }: {
+      members: { id: string; name: string; userAvatar: string | null }[];
+      callers: { id: string; name: string }[];
+    }) => {
+      setParticipants(members.filter((m) => m.id !== userId));
+      setActiveCallers(callers.filter((c) => c.id !== userId));
     });
 
     // Host deleted the room — kick everyone back to the rooms list
-    s.on("room-closed", () => {
-      setLocation("/rooms");
-    });
+    s.on("room-closed", () => setLocation("/rooms"));
 
-    s.on("chat-message", (msg: ChatMessage) => addMessage(msg));
+    s.on("chat-message", (msg: ChatMessage) => addMessageRef.current(msg));
 
     s.on("reaction", ({ emoji }: { emoji: string }) => {
       const id = Date.now() + Math.random();
@@ -334,51 +355,58 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       }, 1000);
     });
 
-    s.on("user-joined", ({ userId, userName }: { userId: string; userName: string }) => {
+    s.on("user-joined", ({ userId: uid, userName }: { userId: string; userName: string }) => {
       setParticipants((prev) =>
-        prev.find((p) => p.id === userId) ? prev : [...prev, { id: userId, name: userName }]
+        prev.find((p) => p.id === uid) ? prev : [...prev, { id: uid, name: userName }]
       );
     });
 
-    s.on("user-left", ({ userId }: { userId: string }) => {
-      setParticipants((prev) => prev.filter((p) => p.id !== userId));
+    s.on("user-left", ({ userId: uid }: { userId: string }) => {
+      setParticipants((prev) => prev.filter((p) => p.id !== uid));
     });
 
-    // Another room member started a call — if we're already in a call, open a peer
-    s.on("call-joined", ({ userId, userName }: { userId: string; userName: string }) => {
-      if (!localStreamRef.current) return; // we're not in a call
-      if (peersRef.current.has(userId)) return; // already connected
-      // Only one side initiates: the one with the lexicographically smaller ID
-      createPeerConnection(userId, userName, user.id < userId);
+    // Someone joined the call — update the visible callers list for everyone.
+    // If WE are already in the call, also open a peer connection to them.
+    s.on("call-joined", ({ userId: uid, userName }: { userId: string; userName: string }) => {
+      // Always update the "who's on a call" banner so non-callers can see it
+      setActiveCallers((prev) =>
+        prev.find((c) => c.id === uid) ? prev : [...prev, { id: uid, name: userName }]
+      );
+      if (!localStreamRef.current) return; // we're not in the call ourselves
+      if (peersRef.current.has(uid)) return;
+      createPeerRef.current(uid, userName, userId < uid);
     });
 
-    // A room member left the call — tear down their peer
-    s.on("call-left", ({ userId }: { userId: string }) => {
-      destroyPeerConnection(userId);
+    // Someone left the call — remove from callers list and tear down peer
+    s.on("call-left", ({ userId: uid }: { userId: string }) => {
+      setActiveCallers((prev) => prev.filter((c) => c.id !== uid));
+      destroyPeerRef.current(uid);
     });
 
-    // Server replies with the list of people already in the call when we join
+    // Server replies with everyone already in the call when WE join.
+    // Update the callers banner AND open peer connections.
     s.on("call-state", ({ callers }: { callers: { id: string; name: string }[] }) => {
+      setActiveCallers(callers.filter((c) => c.id !== userId));
       if (!localStreamRef.current) return;
       callers.forEach(({ id: callerId, name: callerName }) => {
-        if (callerId === user.id) return;
+        if (callerId === userId) return;
         if (peersRef.current.has(callerId)) return;
-        createPeerConnection(callerId, callerName, user.id < callerId);
+        createPeerRef.current(callerId, callerName, userId < callerId);
       });
     });
 
     // Host changed the video server — mirror it on our end
     s.on("host-action", (action: { type: string; serverIdx?: number }) => {
       if (action.type === "server-change" && action.serverIdx !== undefined) {
-        switchTo(action.serverIdx);
+        switchToRef.current(action.serverIdx);
       }
     });
 
-    // WebRTC signaling
+    // WebRTC signaling relay
     s.on("webrtc-signal", ({ from, fromName, signal }: { from: string; fromName: string; signal: any }) => {
       if (!localStreamRef.current) return;
       let conn = peersRef.current.get(from);
-      if (!conn) conn = createPeerConnection(from, fromName, false);
+      if (!conn) conn = createPeerRef.current(from, fromName, false);
       conn.peer.signal(signal);
     });
 
@@ -388,7 +416,9 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       peersRef.current.forEach((conn) => conn.peer.destroy());
       peersRef.current.clear();
     };
-  }, [user, roomId, addMessage, createPeerConnection, destroyPeerConnection, switchTo, setLocation]);
+  // Only re-run when the actual user identity or room changes — not on every callback re-creation
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, roomId, setLocation]);
 
   // ---------------------------------------------------------------------
   // Chat / Room Actions
@@ -771,6 +801,34 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
       {/* Sidebar */}
       <div className="w-full lg:w-96 flex flex-col bg-card border-l border-border/50 h-full">
+        {/* Active call banner — shown when others are on a call and you haven't joined */}
+        {activeCallers.length > 0 && !inCall && (
+          <div className="mx-3 mt-3 p-3 rounded-xl bg-green-950/60 border border-green-600/40 flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse flex-shrink-0" />
+              <p className="text-green-300 text-xs font-semibold leading-tight">
+                {activeCallers.length === 1
+                  ? `${activeCallers[0].name} is on a call`
+                  : `${activeCallers.map((c) => c.name).join(", ")} are on a call`}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => joinCall('audio')}
+                className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-all"
+              >
+                <PhoneCall className="w-3 h-3" /> Voice
+              </button>
+              <button
+                onClick={() => joinCall('video')}
+                className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded-lg transition-all"
+              >
+                <Video className="w-3 h-3" /> Video
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Call Controls */}
         <div className="p-3 border-b border-border/50 flex items-center gap-2">
           {!inCall ? (
