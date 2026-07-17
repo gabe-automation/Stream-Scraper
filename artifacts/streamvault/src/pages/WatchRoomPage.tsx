@@ -47,12 +47,15 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const [, setLocation] = useLocation();
   const { user } = useUser();
   const [socket, setSocket] = useState<Socket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const [activeTab, setActiveTab] = useState<"chat" | "participants">("chat");
 
   const { data: room, isLoading: loadingRoom } = useGetRoom(roomId, { query: { enabled: !!roomId } });
   const deleteRoomMutation = useDeleteRoom();
   const { data: initialMessages } = useGetRoomMessages(roomId, { query: { enabled: !!roomId } });
   const isHost = room?.hostId === user?.id;
+  const isHostRef = useRef(false);
+  useEffect(() => { isHostRef.current = isHost; }, [isHost]);
 
   // ----- Video Player State -----
   const [serverIdx, setServerIdx] = useState(0);
@@ -67,19 +70,32 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const [selectorPosition, setSelectorPosition] = useState<'bottom' | 'top' | 'right'>('bottom');
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
 
-  // 🌟 Sync Countdown State
+  // Sync Countdown State
   const [syncCountdown, setSyncCountdown] = useState<number | null>(null);
 
   const server = SERVERS[serverIdx];
   const embedUrl = room ? server.getUrl(room.contentType as ContentType, room.contentId, room.season ?? undefined, room.episode ?? undefined) : "";
 
+  // Switch server locally (no side effects — used by host-action handler too)
   const switchTo = useCallback((idx: number) => {
     setLoaded(false);
     setServerIdx(idx);
     setIframeKey((k) => k + 1);
     setShowBar(true);
   }, []);
-  const nextServer = () => switchTo((serverIdx + 1) % SERVERS.length);
+
+  // Host switches server and broadcasts to all members
+  const handleServerSwitch = useCallback((idx: number) => {
+    switchTo(idx);
+    if (isHostRef.current) {
+      socketRef.current?.emit("host-action", {
+        roomId,
+        action: { type: "server-change", serverIdx: idx },
+      });
+    }
+  }, [roomId, switchTo]);
+
+  const nextServer = () => handleServerSwitch((serverIdx + 1) % SERVERS.length);
 
   const resetHideTimer = useCallback(() => {
     setShowBar(true);
@@ -100,7 +116,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [linkCopied, setLinkCopied] = useState(false);
 
-  // 🌟 Safe Message Adder (Prevents duplicate join/leave spam without removing your logic)
+  // Safe dedup message adder
   const addMessage = useCallback((msg: ChatMessage) => {
     setMessages((prev) => {
       if (msg.type === 'system') {
@@ -134,28 +150,39 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     }
   }, [localStream]);
 
+  // Stop media on unmount
+  useEffect(() => {
+    return () => { localStreamRef.current?.getTracks().forEach((t) => t.stop()); };
+  }, []);
+
   // ---------------------------------------------------------------------
   // WebRTC Helper Functions
   // ---------------------------------------------------------------------
-  const createPeerConnection = (peerId: string, peerName: string, initiator: boolean): PeerConnection => {
+  const createPeerConnection = useCallback((peerId: string, peerName: string, initiator: boolean): PeerConnection => {
     const peer = new SimplePeer({
       initiator,
       trickle: true,
       stream: localStreamRef.current || undefined,
       config: {
-        // 🌟 Robust ICE servers for strict networks
         iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' },
-          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-        ]
-      }
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:global.stun.twilio.com:3478" },
+          { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+          { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+          { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+        ],
+      },
     });
 
     peer.on("signal", (signal: any) => {
-      socket?.emit("webrtc-signal", { roomId, to: peerId, from: user!.id, fromName: user!.fullName || user!.firstName || "Anonymous", signal });
+      socketRef.current?.emit("webrtc-signal", {
+        roomId,
+        to: peerId,
+        from: user!.id,
+        fromName: user!.fullName || user!.firstName || "Anonymous",
+        signal,
+      });
     });
 
     peer.on("stream", (remoteStream: MediaStream) => {
@@ -166,8 +193,8 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       }
     });
 
-    // 🌟 Fallback for modern browsers that emit 'track' instead of 'stream'
-    peer.on("track", (track: any, stream: MediaStream) => {
+    // Fallback for modern browsers that emit 'track' instead of 'stream'
+    peer.on("track", (_track: any, stream: MediaStream) => {
       const conn = peersRef.current.get(peerId);
       if (conn && stream) {
         conn.stream = stream;
@@ -182,24 +209,24 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     peersRef.current.set(peerId, conn);
     forcePeerRerender((n) => n + 1);
     return conn;
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, user]);
 
-  const destroyPeerConnection = (peerId: string) => {
+  const destroyPeerConnection = useCallback((peerId: string) => {
     const conn = peersRef.current.get(peerId);
     if (conn) {
       conn.peer.destroy();
       peersRef.current.delete(peerId);
       forcePeerRerender((n) => n + 1);
     }
-  };
+  }, []);
 
   const joinCall = async (type: 'audio' | 'video') => {
     try {
-      const constraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
-        video: type === 'video' ? { width: 640, height: 480, facingMode: 'user' } : false
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video: type === 'video' ? { width: 640, height: 480, facingMode: 'user' } : false,
+      });
       localStreamRef.current = stream;
       setLocalStream(stream);
       setCamOn(type === 'video');
@@ -207,17 +234,20 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       setInCall(true);
       setCallType(type);
 
-      participants.forEach((p) => {
-        if (p.id === user?.id) return;
-        // 🌟 FIXED: Only initiate if our ID is "less than" theirs to prevent double-dialing glare
-        createPeerConnection(p.id, p.name, user!.id < p.id);
+      // Tell server we joined — it will reply with call-state (existing callers)
+      // and broadcast call-joined to everyone else so they open peer connections to us.
+      socketRef.current?.emit("call-joined", {
+        roomId,
+        userId: user!.id,
+        userName: user!.fullName || user!.firstName || "Anonymous",
       });
-    } catch (err) {
+    } catch {
       alert("Could not access camera/microphone. Please check browser permissions.");
     }
   };
 
-  const leaveCall = () => {
+  const leaveCall = useCallback(() => {
+    socketRef.current?.emit("call-left", { roomId, userId: user!.id });
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     setLocalStream(null);
@@ -227,7 +257,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     peersRef.current.forEach((conn) => conn.peer.destroy());
     peersRef.current.clear();
     forcePeerRerender((n) => n + 1);
-  };
+  }, [roomId, user]);
 
   const toggleMic = () => {
     if (!localStreamRef.current) return;
@@ -251,24 +281,39 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     setTimeout(() => setLinkCopied(false), 2000);
   };
 
-  // 🌟 Host Sync Countdown Trigger
+  // Host triggers a sync countdown for everyone
   const startSyncCountdown = () => {
-    socket?.emit("sync-countdown", { roomId, seconds: 5 });
+    socketRef.current?.emit("sync-countdown", { roomId, seconds: 5 });
   };
 
-  useEffect(() => {
-    return () => { localStreamRef.current?.getTracks().forEach((t) => t.stop()); };
-  }, []);
-
   // ---------------------------------------------------------------------
-  // Socket connection + signaling
+  // Socket connection + event handlers
   // ---------------------------------------------------------------------
   useEffect(() => {
     if (!user || !roomId) return;
 
-    const s = io({ path: "/ws/socket.io", query: { roomId, userId: user.id, userName: user.fullName || user.firstName || "Anonymous" } });
+    const s = io({ path: "/ws/socket.io" });
+    socketRef.current = s;
+    setSocket(s);
 
-    s.on("connect", () => s.emit("join-room", { roomId, userId: user.id, userName: user.fullName || user.firstName || "Anonymous" }));
+    s.on("connect", () => {
+      s.emit("join-room", {
+        roomId,
+        userId: user.id,
+        userName: user.fullName || user.firstName || "Anonymous",
+        userAvatar: user.imageUrl ?? null,
+      });
+    });
+
+    // Full member list on join — initialises the participants panel
+    s.on("room-state", ({ members }: { members: { id: string; name: string; userAvatar: string | null }[] }) => {
+      setParticipants(members.filter((m) => m.id !== user.id));
+    });
+
+    // Host deleted the room — kick everyone back to the rooms list
+    s.on("room-closed", () => {
+      setLocation("/rooms");
+    });
 
     s.on("chat-message", (msg: ChatMessage) => addMessage(msg));
 
@@ -278,7 +323,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       setTimeout(() => setFloatingReactions((prev) => prev.filter((r) => r.id !== id)), 3000);
     });
 
-    // 🌟 Listen for Sync Countdown
+    // Server relays countdown to all (including host) — show overlay
     s.on("sync-countdown", ({ seconds }: { seconds: number }) => {
       let count = seconds;
       setSyncCountdown(count);
@@ -290,37 +335,60 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     });
 
     s.on("user-joined", ({ userId, userName }: { userId: string; userName: string }) => {
-      setParticipants((prev) => (prev.find((p) => p.id === userId) ? prev : [...prev, { id: userId, name: userName }]));
+      setParticipants((prev) =>
+        prev.find((p) => p.id === userId) ? prev : [...prev, { id: userId, name: userName }]
+      );
+    });
 
-      // Kept your manual system message append, but routed through addMessage to prevent duplicates
-      addMessage({ id: Date.now().toString(), roomId, userId: "system", userName: "System", userAvatar: null, content: `${userName} joined the room`, type: "system", createdAt: new Date().toISOString() } as ChatMessage);
+    s.on("user-left", ({ userId }: { userId: string }) => {
+      setParticipants((prev) => prev.filter((p) => p.id !== userId));
+    });
 
-      if (inCallRef.current && localStreamRef.current && userId !== user.id) {
-        // 🌟 FIXED: Only initiate if our ID is "less than" theirs
-        createPeerConnection(userId, userName, user.id < userId);
+    // Another room member started a call — if we're already in a call, open a peer
+    s.on("call-joined", ({ userId, userName }: { userId: string; userName: string }) => {
+      if (!localStreamRef.current) return; // we're not in a call
+      if (peersRef.current.has(userId)) return; // already connected
+      // Only one side initiates: the one with the lexicographically smaller ID
+      createPeerConnection(userId, userName, user.id < userId);
+    });
+
+    // A room member left the call — tear down their peer
+    s.on("call-left", ({ userId }: { userId: string }) => {
+      destroyPeerConnection(userId);
+    });
+
+    // Server replies with the list of people already in the call when we join
+    s.on("call-state", ({ callers }: { callers: { id: string; name: string }[] }) => {
+      if (!localStreamRef.current) return;
+      callers.forEach(({ id: callerId, name: callerName }) => {
+        if (callerId === user.id) return;
+        if (peersRef.current.has(callerId)) return;
+        createPeerConnection(callerId, callerName, user.id < callerId);
+      });
+    });
+
+    // Host changed the video server — mirror it on our end
+    s.on("host-action", (action: { type: string; serverIdx?: number }) => {
+      if (action.type === "server-change" && action.serverIdx !== undefined) {
+        switchTo(action.serverIdx);
       }
     });
 
-    s.on("user-left", ({ userId, userName }: { userId: string; userName: string }) => {
-      setParticipants((prev) => prev.filter((p) => p.id !== userId));
-      destroyPeerConnection(userId);
-      addMessage({ id: Date.now().toString(), roomId, userId: "system", userName: "System", userAvatar: null, content: `${userName} left the room`, type: "system", createdAt: new Date().toISOString() } as ChatMessage);
-    });
-
+    // WebRTC signaling
     s.on("webrtc-signal", ({ from, fromName, signal }: { from: string; fromName: string; signal: any }) => {
-      if (!inCallRef.current || !localStreamRef.current) return; 
+      if (!localStreamRef.current) return;
       let conn = peersRef.current.get(from);
       if (!conn) conn = createPeerConnection(from, fromName, false);
       conn.peer.signal(signal);
     });
 
-    setSocket(s);
     return () => {
       s.disconnect();
+      socketRef.current = null;
       peersRef.current.forEach((conn) => conn.peer.destroy());
       peersRef.current.clear();
     };
-  }, [user, roomId, addMessage]);
+  }, [user, roomId, addMessage, createPeerConnection, destroyPeerConnection, switchTo, setLocation]);
 
   // ---------------------------------------------------------------------
   // Chat / Room Actions
@@ -328,31 +396,54 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || !socket || !user) return;
-    socket.emit("chat-message", { roomId, userId: user.id, userName: user.fullName || user.firstName || "Anonymous", userAvatar: user.imageUrl, content: chatInput, type: "text" });
+    socket.emit("chat-message", {
+      roomId,
+      userId: user.id,
+      userName: user.fullName || user.firstName || "Anonymous",
+      userAvatar: user.imageUrl,
+      content: chatInput,
+      type: "text",
+    });
     setChatInput("");
   };
 
   const sendReaction = (emoji: string) => {
     if (!socket || !user) return;
-    socket.emit("reaction", { roomId, emoji, userId: user.id, userName: user.fullName || user.firstName || "Anonymous" });
+    socket.emit("reaction", {
+      roomId,
+      emoji,
+      userId: user.id,
+      userName: user.fullName || user.firstName || "Anonymous",
+    });
   };
 
   const handleEndRoom = () => {
-    if (confirm("End watch party for everyone?")) deleteRoomMutation.mutate({ id: roomId }, { onSuccess: () => setLocation("/rooms") });
+    if (confirm("End watch party for everyone?")) {
+      deleteRoomMutation.mutate({ id: roomId }, { onSuccess: () => setLocation("/rooms") });
+    }
   };
 
-  if (loadingRoom) return <div className="flex-1 flex justify-center items-center h-screen"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>;
-  if (!room) return <div className="flex-1 flex justify-center items-center h-screen">Room not found</div>;
+  if (loadingRoom) return (
+    <div className="flex-1 flex justify-center items-center h-screen">
+      <Loader2 className="w-8 h-8 animate-spin text-primary" />
+    </div>
+  );
+  if (!room) return (
+    <div className="flex-1 flex justify-center items-center h-screen">Room not found</div>
+  );
 
   return (
     <div className="flex flex-col lg:flex-row h-[calc(100vh-64px)] w-full overflow-hidden bg-background">
 
-      {/* 🌟 Giant Sync Countdown Overlay */}
+      {/* Sync Countdown Overlay */}
       {syncCountdown !== null && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm pointer-events-none">
           <div className="flex flex-col items-center gap-4">
-            <p className="text-white/60 text-xl font-medium">Get ready to press play...</p>
-            <div className="text-[150px] font-black text-yellow-400 tabular-nums drop-shadow-2xl" style={{ textShadow: '0 0 40px rgba(250,204,21,0.8)' }}>
+            <p className="text-white/60 text-xl font-medium">Get ready to press play…</p>
+            <div
+              className="text-[150px] font-black text-yellow-400 tabular-nums drop-shadow-2xl"
+              style={{ textShadow: "0 0 40px rgba(250,204,21,0.8)" }}
+            >
               {syncCountdown}
             </div>
             <p className="text-white/80 text-2xl font-bold uppercase tracking-widest">Press Play Now!</p>
@@ -376,7 +467,6 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
             </div>
           )}
 
-          {/* 🌟 allow-popups added back so embed providers can verify the user */}
           <iframe
             key={iframeKey}
             src={embedUrl}
@@ -401,32 +491,48 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                   <p className="text-white/60 text-xs truncate">{room.contentTitle}</p>
                 </div>
 
-                {/* 🌟 Host Sync Button */}
+                {/* Host-only controls */}
                 {isHost && (
-                  <button onClick={startSyncCountdown} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg" title="Start 5s Countdown for everyone to press play">
-                    <Timer className="w-3.5 h-3.5" /> Sync Play
-                  </button>
+                  <>
+                    <button
+                      onClick={startSyncCountdown}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg"
+                      title="Start 5s countdown for everyone to press play"
+                    >
+                      <Timer className="w-3.5 h-3.5" /> Sync Play
+                    </button>
+                    <button
+                      onClick={handleEndRoom}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-700 hover:bg-red-600 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg"
+                      title="End the watch party for everyone"
+                    >
+                      End Room
+                    </button>
+                  </>
                 )}
 
                 <button onClick={() => setShowInfo(true)} className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0 pointer-events-auto" title="Player Info">
                   <Info className="w-4 h-4" />
                 </button>
 
-                {/* 🌟 Layout Settings Menu */}
+                {/* Layout Settings Menu */}
                 <div className="relative pointer-events-auto">
-                  <button 
-                    onClick={() => setShowLayoutMenu(!showLayoutMenu)} 
-                    className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0" 
+                  <button
+                    onClick={() => setShowLayoutMenu(!showLayoutMenu)}
+                    className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0"
                     title="Layout Settings"
                   >
                     <Settings className="w-4 h-4" />
                   </button>
 
                   {showLayoutMenu && (
-                    <div className="absolute top-full right-0 mt-2 w-56 bg-card border border-border rounded-lg shadow-xl p-3 z-50" onClick={e => e.stopPropagation()}>
+                    <div
+                      className="absolute top-full right-0 mt-2 w-56 bg-card border border-border rounded-lg shadow-xl p-3 z-50"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       <div className="flex items-center justify-between mb-3">
                         <span className="text-sm font-medium text-foreground">Server Selector</span>
-                        <button 
+                        <button
                           onClick={() => setSelectorVisible(!selectorVisible)}
                           className={`w-10 h-5 rounded-full transition-colors relative ${selectorVisible ? 'bg-primary' : 'bg-muted'}`}
                         >
@@ -436,7 +542,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                       {selectorVisible && (
                         <div className="space-y-1.5 border-t border-border pt-3">
                           <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Position</p>
-                          {(['bottom', 'top', 'right'] as const).map(pos => (
+                          {(['bottom', 'top', 'right'] as const).map((pos) => (
                             <button
                               key={pos}
                               onClick={() => setSelectorPosition(pos)}
@@ -451,19 +557,26 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                   )}
                 </div>
 
-                <button onClick={copyInviteLink} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all pointer-events-auto ${linkCopied ? 'bg-green-500/20 border-green-500/30 text-green-400' : 'bg-white/10 border-white/20 text-white hover:bg-white/20'}`}>
+                <button
+                  onClick={copyInviteLink}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all pointer-events-auto ${linkCopied ? 'bg-green-500/20 border-green-500/30 text-green-400' : 'bg-white/10 border-white/20 text-white hover:bg-white/20'}`}
+                >
                   {linkCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                   {linkCopied ? "Copied!" : "Invite"}
                 </button>
 
-                <button onClick={() => { setLoaded(false); setIframeKey((k) => k + 1); }} className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0 pointer-events-auto" title="Reload">
+                <button
+                  onClick={() => { setLoaded(false); setIframeKey((k) => k + 1); }}
+                  className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0 pointer-events-auto"
+                  title="Reload"
+                >
                   <RefreshCw className="w-4 h-4" />
                 </button>
               </div>
             </div>
           </div>
 
-          {/* 🌟 Dynamic Server Selector */}
+          {/* Dynamic Server Selector */}
           {selectorVisible && (
             <>
               {selectorPosition === 'bottom' && (
@@ -473,14 +586,22 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                       <div className="flex items-center gap-1.5 text-yellow-400/80 text-xs">
                         <AlertTriangle className="w-3 h-3" />
                         <span>Video not loading? Try a different server</span>
+                        {isHost && <span className="text-white/40 ml-1">(synced to all members)</span>}
                       </div>
                       <div className="flex items-center gap-2 flex-wrap justify-center">
                         {SERVERS.map((s, idx) => (
-                          <button key={s.id} onClick={() => switchTo(idx)} className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${idx === serverIdx ? 'bg-yellow-400 text-black border-yellow-400' : 'bg-white/5 text-white/70 border-white/10 hover:bg-white/15'}`}>
+                          <button
+                            key={s.id}
+                            onClick={() => handleServerSwitch(idx)}
+                            className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${idx === serverIdx ? 'bg-yellow-400 text-black border-yellow-400' : 'bg-white/5 text-white/70 border-white/10 hover:bg-white/15'}`}
+                          >
                             {s.name}
                           </button>
                         ))}
-                        <button onClick={nextServer} className="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-white/70 border border-white/10 hover:bg-white/20">
+                        <button
+                          onClick={nextServer}
+                          className="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-white/70 border border-white/10 hover:bg-white/20"
+                        >
                           Next <ChevronRight className="w-3 h-3" />
                         </button>
                       </div>
@@ -495,14 +616,22 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                     <div className="flex items-center gap-1.5 text-yellow-400/80 text-xs">
                       <AlertTriangle className="w-3 h-3" />
                       <span>Video not loading? Try a different server</span>
+                      {isHost && <span className="text-white/40 ml-1">(synced to all members)</span>}
                     </div>
                     <div className="flex items-center gap-2 flex-wrap justify-center">
                       {SERVERS.map((s, idx) => (
-                        <button key={s.id} onClick={() => switchTo(idx)} className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${idx === serverIdx ? 'bg-yellow-400 text-black border-yellow-400' : 'bg-white/5 text-white/70 border-white/10 hover:bg-white/15'}`}>
+                        <button
+                          key={s.id}
+                          onClick={() => handleServerSwitch(idx)}
+                          className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${idx === serverIdx ? 'bg-yellow-400 text-black border-yellow-400' : 'bg-white/5 text-white/70 border-white/10 hover:bg-white/15'}`}
+                        >
                           {s.name}
                         </button>
                       ))}
-                      <button onClick={nextServer} className="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-white/70 border border-white/10 hover:bg-white/20">
+                      <button
+                        onClick={nextServer}
+                        className="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-white/70 border border-white/10 hover:bg-white/20"
+                      >
                         Next <ChevronRight className="w-3 h-3" />
                       </button>
                     </div>
@@ -513,26 +642,33 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
               {selectorPosition === 'right' && (
                 <div className={`absolute top-1/2 -translate-y-1/2 right-4 z-20 transition-opacity duration-300 pointer-events-none ${showBar ? "opacity-100" : "opacity-0"}`}>
                   <div className="flex flex-col items-center gap-2 pointer-events-auto bg-black/80 p-2 rounded-xl backdrop-blur-md border border-white/10 shadow-2xl max-h-[70vh] overflow-y-auto">
-                     <div className="text-yellow-400/80 text-[10px] font-bold uppercase tracking-wider mb-1">
-                       Servers
-                     </div>
-                     <div className="flex flex-col items-center gap-1.5 w-20">
-                       {SERVERS.map((s, idx) => (
-                         <button key={s.id} onClick={() => switchTo(idx)} className={`w-full px-2 py-1.5 rounded-md text-[11px] font-semibold border transition-all text-center truncate ${idx === serverIdx ? 'bg-yellow-400 text-black border-yellow-400' : 'bg-white/5 text-white/70 border-white/10 hover:bg-white/15'}`}>
-                           {s.name}
-                         </button>
-                       ))}
-                       <button onClick={nextServer} className="w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[11px] font-semibold bg-white/10 text-white/70 border border-white/10 hover:bg-white/20">
-                         Next
-                       </button>
-                     </div>
+                    <div className="text-yellow-400/80 text-[10px] font-bold uppercase tracking-wider mb-1">
+                      Servers
+                    </div>
+                    <div className="flex flex-col items-center gap-1.5 w-20">
+                      {SERVERS.map((s, idx) => (
+                        <button
+                          key={s.id}
+                          onClick={() => handleServerSwitch(idx)}
+                          className={`w-full px-2 py-1.5 rounded-md text-[11px] font-semibold border transition-all text-center truncate ${idx === serverIdx ? 'bg-yellow-400 text-black border-yellow-400' : 'bg-white/5 text-white/70 border-white/10 hover:bg-white/15'}`}
+                        >
+                          {s.name}
+                        </button>
+                      ))}
+                      <button
+                        onClick={nextServer}
+                        className="w-full flex items-center justify-center gap-1 px-2 py-1.5 rounded-md text-[11px] font-semibold bg-white/10 text-white/70 border border-white/10 hover:bg-white/20"
+                      >
+                        Next
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
             </>
           )}
 
-          {/* 🎥 Floating Call Grid (Picture-in-Picture) */}
+          {/* Floating Call Grid (Picture-in-Picture) */}
           {inCall && (
             <div className="absolute bottom-28 right-4 z-30 bg-black/80 backdrop-blur-md rounded-xl p-3 shadow-2xl border border-white/10 flex flex-col gap-2 max-w-xs pointer-events-auto">
               <div className="flex items-center justify-between mb-1">
@@ -544,10 +680,17 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
               </div>
 
               <div className="grid grid-cols-2 gap-2">
+                {/* Local tile */}
                 <div className="relative w-24 h-16 bg-secondary rounded-md overflow-hidden">
                   {callType === 'video' && camOn ? (
-                    // 🌟 FIXED: scaleX(-1) mirrors the camera so it's not inverted
-                    <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} />
+                    <video
+                      ref={localVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover"
+                      style={{ transform: 'scaleX(-1)' }}
+                    />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-white text-xl font-bold bg-primary/20">
                       {user?.firstName?.charAt(0) || 'Y'}
@@ -556,6 +699,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                   <span className="absolute bottom-0 left-0 bg-black/60 text-white text-[9px] px-1">You</span>
                 </div>
 
+                {/* Remote tiles */}
                 {Array.from(peersRef.current.values()).map((conn) => (
                   <div key={conn.peerId} className="relative w-24 h-16 bg-secondary rounded-md overflow-hidden">
                     {conn.stream ? (
@@ -571,11 +715,19 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
               </div>
 
               <div className="flex justify-center gap-3 mt-1">
-                <button onClick={toggleMic} className={`p-1.5 rounded-full ${micOn ? 'bg-white/10 text-white' : 'bg-red-500 text-white'}`}>
+                <button
+                  onClick={toggleMic}
+                  className={`p-1.5 rounded-full ${micOn ? 'bg-white/10 text-white' : 'bg-red-500 text-white'}`}
+                  title={micOn ? "Mute" : "Unmute"}
+                >
                   {micOn ? <Mic className="w-3.5 h-3.5" /> : <MicOff className="w-3.5 h-3.5" />}
                 </button>
                 {callType === 'video' && (
-                  <button onClick={toggleCam} className={`p-1.5 rounded-full ${camOn ? 'bg-white/10 text-white' : 'bg-red-500 text-white'}`}>
+                  <button
+                    onClick={toggleCam}
+                    className={`p-1.5 rounded-full ${camOn ? 'bg-white/10 text-white' : 'bg-red-500 text-white'}`}
+                    title={camOn ? "Hide camera" : "Show camera"}
+                  >
                     {camOn ? <Video className="w-3.5 h-3.5" /> : <VideoOff className="w-3.5 h-3.5" />}
                   </button>
                 )}
@@ -585,19 +737,32 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
           {/* Info Modal */}
           {showInfo && (
-            <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6 pointer-events-auto" onClick={() => setShowInfo(false)}>
-              <div className="bg-card border border-border rounded-xl p-6 max-w-md shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div
+              className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6 pointer-events-auto"
+              onClick={() => setShowInfo(false)}
+            >
+              <div className="bg-card border border-border rounded-xl p-6 max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
                 <div className="flex justify-between items-start mb-4">
                   <h3 className="text-lg font-bold text-foreground">About Video Controls</h3>
-                  <button onClick={() => setShowInfo(false)} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
+                  <button onClick={() => setShowInfo(false)} className="text-muted-foreground hover:text-foreground">
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
                 <p className="text-sm text-muted-foreground mb-4">
-                  Because we use secure, third-party video servers (like VidSrc and Smashy), browser security policies physically prevent external websites from hiding their native controls or injecting custom Play/Pause buttons.
+                  Because we use secure, third-party video servers (like VidSrc and Smashy), browser security policies prevent external websites from exposing programmatic play/pause controls.
                 </p>
                 <p className="text-sm text-muted-foreground mb-4">
-                  <strong className="text-foreground">How to watch:</strong> Simply click anywhere on the video to reveal the server's native Play, Pause, Quality, and Fullscreen controls.
+                  <strong className="text-foreground">How to sync:</strong> The host can press <strong className="text-foreground">Sync Play</strong> to broadcast a 5-second countdown to everyone. When it hits zero, everyone presses play at the same time.
                 </p>
-                <button onClick={() => setShowInfo(false)} className="w-full py-2 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors">Got it</button>
+                <p className="text-sm text-muted-foreground mb-4">
+                  <strong className="text-foreground">Server switching:</strong> If the host switches servers, everyone in the room switches automatically.
+                </p>
+                <button
+                  onClick={() => setShowInfo(false)}
+                  className="w-full py-2 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors"
+                >
+                  Got it
+                </button>
               </div>
             </div>
           )}
@@ -606,28 +771,45 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
       {/* Sidebar */}
       <div className="w-full lg:w-96 flex flex-col bg-card border-l border-border/50 h-full">
+        {/* Call Controls */}
         <div className="p-3 border-b border-border/50 flex items-center gap-2">
           {!inCall ? (
             <>
-              <button onClick={() => joinCall('audio')} className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-all">
+              <button
+                onClick={() => joinCall('audio')}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-all"
+              >
                 <PhoneCall className="w-3.5 h-3.5" /> Voice
               </button>
-              <button onClick={() => joinCall('video')} className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded-lg transition-all">
+              <button
+                onClick={() => joinCall('video')}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded-lg transition-all"
+              >
                 <Video className="w-3.5 h-3.5" /> Video
               </button>
             </>
           ) : (
-            <button onClick={leaveCall} className="w-full flex items-center justify-center gap-1.5 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-lg transition-all">
+            <button
+              onClick={leaveCall}
+              className="w-full flex items-center justify-center gap-1.5 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-lg transition-all"
+            >
               <PhoneOff className="w-3.5 h-3.5" /> End Call
             </button>
           )}
         </div>
 
+        {/* Tabs */}
         <div className="flex border-b border-border/50">
-          <button onClick={() => setActiveTab("chat")} className={`flex-1 py-3 flex justify-center items-center gap-2 font-medium text-sm transition-colors border-b-2 ${activeTab === "chat" ? "border-primary text-primary bg-secondary/20" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+          <button
+            onClick={() => setActiveTab("chat")}
+            className={`flex-1 py-3 flex justify-center items-center gap-2 font-medium text-sm transition-colors border-b-2 ${activeTab === "chat" ? "border-primary text-primary bg-secondary/20" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+          >
             <MessageSquare className="w-4 h-4" /> Chat
           </button>
-          <button onClick={() => setActiveTab("participants")} className={`flex-1 py-3 flex justify-center items-center gap-2 font-medium text-sm transition-colors border-b-2 ${activeTab === "participants" ? "border-primary text-primary bg-secondary/20" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+          <button
+            onClick={() => setActiveTab("participants")}
+            className={`flex-1 py-3 flex justify-center items-center gap-2 font-medium text-sm transition-colors border-b-2 ${activeTab === "participants" ? "border-primary text-primary bg-secondary/20" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+          >
             <Users className="w-4 h-4" /> Participants ({participants.length + 1})
           </button>
         </div>
@@ -645,7 +827,9 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                 return (
                   <div key={msg.id} className={`flex gap-3 ${isMe ? "flex-row-reverse" : "flex-row"}`}>
                     <div className="w-8 h-8 rounded-full overflow-hidden flex-shrink-0 bg-secondary border border-border/50">
-                      {msg.userAvatar ? <img src={msg.userAvatar} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-xs font-bold bg-primary/20 text-primary">{msg.userName.charAt(0)}</div>}
+                      {msg.userAvatar
+                        ? <img src={msg.userAvatar} alt="" className="w-full h-full object-cover" />
+                        : <div className="w-full h-full flex items-center justify-center text-xs font-bold bg-primary/20 text-primary">{msg.userName.charAt(0)}</div>}
                     </div>
                     <div className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
                       <span className="text-xs text-muted-foreground mb-1 px-1">{isMe ? 'You' : msg.userName}</span>
@@ -658,44 +842,64 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
               })}
               <div ref={messagesEndRef} />
             </div>
+
+            {/* Emoji Reactions */}
             <div className="p-2 border-t border-border/50 bg-secondary/30 flex justify-around">
               {EMOJIS.map((emoji) => (
-                <button key={emoji} onClick={() => sendReaction(emoji)} className="w-10 h-10 flex items-center justify-center text-xl hover:bg-secondary rounded-full transition-colors active:scale-90">{emoji}</button>
+                <button
+                  key={emoji}
+                  onClick={() => sendReaction(emoji)}
+                  className="w-10 h-10 flex items-center justify-center text-xl hover:bg-secondary rounded-full transition-colors active:scale-90"
+                >
+                  {emoji}
+                </button>
               ))}
             </div>
+
+            {/* Message Input */}
             <form onSubmit={handleSendMessage} className="p-4 border-t border-border/50 bg-card">
               <div className="relative">
-                <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Type a message..." className="w-full bg-input border border-border rounded-full py-2.5 pl-4 pr-12 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary" />
-                <button type="submit" disabled={!chatInput.trim()} className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50">
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  placeholder="Type a message…"
+                  className="w-full bg-input border border-border rounded-full py-2.5 pl-4 pr-12 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                />
+                <button
+                  type="submit"
+                  disabled={!chatInput.trim()}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                >
                   <Send className="w-4 h-4" />
                 </button>
               </div>
             </form>
           </>
         ) : (
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            <div className="p-4 rounded-xl border border-primary/30 bg-primary/5 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="relative w-10 h-10 rounded-full overflow-hidden bg-secondary flex-shrink-0">
-                  <img src={user?.imageUrl} className="w-full h-full object-cover" alt="You" />
-                </div>
-                <div className="min-w-0">
-                  <p className="font-bold text-sm leading-none truncate">{user?.fullName} (You)</p>
-                  <p className="text-xs text-muted-foreground mt-1">{isHost ? "Host" : "Participant"}</p>
-                </div>
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {/* Current user */}
+            <div className="p-4 rounded-xl border border-primary/30 bg-primary/5 flex items-center gap-3">
+              <div className="relative w-10 h-10 rounded-full overflow-hidden bg-secondary flex-shrink-0">
+                <img src={user?.imageUrl} className="w-full h-full object-cover" alt="You" />
+              </div>
+              <div className="min-w-0">
+                <p className="font-bold text-sm leading-none truncate">{user?.fullName} (You)</p>
+                <p className="text-xs text-muted-foreground mt-1">{isHost ? "Host" : "Participant"}</p>
               </div>
             </div>
 
+            {/* Other participants */}
             {participants.map((p) => (
-              <div key={p.id} className="p-4 rounded-xl border border-border/50 bg-secondary/30 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="relative w-10 h-10 rounded-full bg-secondary border border-border flex items-center justify-center text-muted-foreground font-bold flex-shrink-0">
-                    {p.name.charAt(0)}
-                  </div>
-                  <div className="min-w-0">
-                    <p className="font-bold text-sm leading-none truncate">{p.name}</p>
-                    <p className="text-xs text-muted-foreground mt-1">{p.id === room.hostId ? "Host" : "Participant"}</p>
-                  </div>
+              <div key={p.id} className="p-4 rounded-xl border border-border/50 bg-secondary/30 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-secondary border border-border flex items-center justify-center text-muted-foreground font-bold flex-shrink-0">
+                  {p.name.charAt(0)}
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-sm leading-none truncate">{p.name}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {p.id === room.hostId ? "Host" : "Participant"}
+                  </p>
                 </div>
               </div>
             ))}
@@ -706,7 +910,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   );
 }
 
-// 🌟 FIXED: Handles browser autoplay blocks for remote audio/video
+// Handles browser autoplay blocks for remote audio/video
 function RemoteVideoTile({ stream }: { stream: MediaStream }) {
   const ref = useRef<HTMLVideoElement>(null);
   const [audioBlocked, setAudioBlocked] = useState(false);
@@ -716,11 +920,12 @@ function RemoteVideoTile({ stream }: { stream: MediaStream }) {
       ref.current.srcObject = stream;
       const playPromise = ref.current.play();
       if (playPromise !== undefined) {
-        playPromise.catch((e) => {
-          console.log("Autoplay blocked, muting video to allow playback");
+        playPromise.catch(() => {
           setAudioBlocked(true);
-          ref.current!.muted = true;
-          ref.current!.play().catch(() => {});
+          if (ref.current) {
+            ref.current.muted = true;
+            ref.current.play().catch(() => {});
+          }
         });
       }
     }
@@ -737,8 +942,8 @@ function RemoteVideoTile({ stream }: { stream: MediaStream }) {
     <div className="relative w-full h-full group">
       <video ref={ref} autoPlay playsInline className="w-full h-full object-cover cursor-pointer" onClick={handleUnmute} />
       {audioBlocked && (
-        <button 
-          onClick={handleUnmute} 
+        <button
+          onClick={handleUnmute}
           className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white text-[10px] font-bold gap-1 hover:bg-black/40 transition-colors"
         >
           <MicOff className="w-4 h-4" />

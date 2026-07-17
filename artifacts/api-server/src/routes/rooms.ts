@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db, watchRoomsTable, roomMessagesTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import { requireAuth, requireApproved, type AuthRequest } from "../middlewares/auth";
+import { getIO } from "../socket";
 
 const router = Router();
 
@@ -101,6 +102,11 @@ router.delete("/:id", requireAuth, requireApproved, async (req: AuthRequest, res
   }
 
   await db.delete(watchRoomsTable).where(eq(watchRoomsTable.id, roomId));
+
+  // Notify all room members in real time so they get redirected immediately
+  const io = getIO();
+  if (io) io.to(roomId).emit("room-closed", { roomId });
+
   res.json({ message: "Room closed" });
 });
 

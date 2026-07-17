@@ -14,6 +14,16 @@ interface RoomMember {
 // In-memory room member tracking
 const roomMembers = new Map<string, Map<string, RoomMember>>();
 
+// In-memory call state: roomId → Map<userId, userName>
+const roomCallState = new Map<string, Map<string, string>>();
+
+// Module-level IO reference so routes can emit events
+let _io: SocketIOServer | null = null;
+
+export function getIO(): SocketIOServer | null {
+  return _io;
+}
+
 export function setupSocket(server: HTTPServer): SocketIOServer {
   const io = new SocketIOServer(server, {
     path: "/ws/socket.io",
@@ -23,9 +33,12 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
     },
   });
 
+  _io = io;
+
   io.on("connection", (socket) => {
     logger.info({ socketId: socket.id }, "Socket connected");
 
+    // ─── Join room ──────────────────────────────────────────────────────────
     socket.on(
       "join-room",
       async ({
@@ -41,10 +54,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
       }) => {
         socket.join(roomId);
 
-        if (!roomMembers.has(roomId)) {
-          roomMembers.set(roomId, new Map());
-        }
-
+        if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Map());
         const members = roomMembers.get(roomId)!;
         members.set(userId, {
           userId,
@@ -53,15 +63,14 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
           socketId: socket.id,
         });
 
-        // Store in socket data for cleanup
         socket.data.roomId = roomId;
         socket.data.userId = userId;
         socket.data.userName = userName;
 
-        // Notify room of new member
+        // Notify existing members of new joiner
         socket.to(roomId).emit("user-joined", { userId, userName });
 
-        // Send current member list to new joiner
+        // Send full member list to the new joiner
         const memberList = Array.from(members.values()).map((m) => ({
           id: m.userId,
           name: m.userName,
@@ -69,11 +78,10 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         }));
         socket.emit("room-state", { members: memberList });
 
-        // Save system message & broadcast to chat
+        // System message
         try {
           const sysMsgId = crypto.randomUUID();
           const sysMsgContent = `${userName} joined the room`;
-
           await db.insert(roomMessagesTable).values({
             id: sysMsgId,
             roomId,
@@ -82,7 +90,6 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
             content: sysMsgContent,
             type: "system",
           });
-
           io.to(roomId).emit("chat-message", {
             id: sysMsgId,
             roomId,
@@ -101,6 +108,67 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
       },
     );
 
+    // ─── Sync countdown relay ───────────────────────────────────────────────
+    // Host emits this; server relays to all room members (including host)
+    socket.on(
+      "sync-countdown",
+      ({ roomId, seconds }: { roomId: string; seconds: number }) => {
+        io.to(roomId).emit("sync-countdown", { seconds });
+      },
+    );
+
+    // ─── Host action relay ──────────────────────────────────────────────────
+    // Used for server selection changes; relayed to all non-host members
+    socket.on(
+      "host-action",
+      ({ roomId, action }: { roomId: string; action: unknown }) => {
+        socket.to(roomId).emit("host-action", action);
+      },
+    );
+
+    // ─── WebRTC call signaling ──────────────────────────────────────────────
+    // Emitted when a user joins the call; server replies with current callers,
+    // then broadcasts call-joined so existing callers can open a peer connection.
+    socket.on(
+      "call-joined",
+      ({
+        roomId,
+        userId,
+        userName,
+      }: {
+        roomId: string;
+        userId: string;
+        userName: string;
+      }) => {
+        if (!roomCallState.has(roomId)) roomCallState.set(roomId, new Map());
+        const callers = roomCallState.get(roomId)!;
+
+        // Reply to new caller with everyone already in the call (excluding themselves)
+        const existingCallers = Array.from(callers.entries())
+          .filter(([id]) => id !== userId)
+          .map(([id, name]) => ({ id, name }));
+        socket.emit("call-state", { callers: existingCallers });
+
+        // Register this user
+        callers.set(userId, userName);
+
+        // Tell existing callers to open a peer connection
+        socket.to(roomId).emit("call-joined", { userId, userName });
+
+        logger.info({ roomId, userId }, "User joined call");
+      },
+    );
+
+    socket.on(
+      "call-left",
+      ({ roomId, userId }: { roomId: string; userId: string }) => {
+        roomCallState.get(roomId)?.delete(userId);
+        socket.to(roomId).emit("call-left", { userId });
+        logger.info({ roomId, userId }, "User left call");
+      },
+    );
+
+    // ─── Chat ───────────────────────────────────────────────────────────────
     socket.on(
       "chat-message",
       async ({
@@ -118,7 +186,6 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
       }) => {
         const messageId = crypto.randomUUID();
         const createdAt = new Date().toISOString();
-
         const msg = {
           id: messageId,
           roomId,
@@ -129,11 +196,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
           type: "text" as const,
           createdAt,
         };
-
-        // Broadcast to all in room (including sender)
         io.to(roomId).emit("chat-message", msg);
-
-        // Persist
         try {
           await db.insert(roomMessagesTable).values({
             id: messageId,
@@ -149,6 +212,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
       },
     );
 
+    // ─── Reactions ──────────────────────────────────────────────────────────
     socket.on(
       "reaction",
       ({
@@ -166,7 +230,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
       },
     );
 
-    // 🌟 WebRTC Signaling (Matches frontend "webrtc-signal" event)
+    // ─── WebRTC Signaling ────────────────────────────────────────────────────
     socket.on(
       "webrtc-signal",
       ({
@@ -182,26 +246,35 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         fromName: string;
         signal: unknown;
       }) => {
-        // Forward WebRTC signal to specific peer
         const members = roomMembers.get(roomId);
         if (members) {
           const target = members.get(to);
           if (target) {
-            io.to(target.socketId).emit("webrtc-signal", { from, fromName, signal });
+            io.to(target.socketId).emit("webrtc-signal", {
+              from,
+              fromName,
+              signal,
+            });
           }
         }
       },
     );
 
+    // ─── Disconnect ──────────────────────────────────────────────────────────
     socket.on("disconnect", async () => {
       const { roomId, userId, userName } = socket.data;
       if (roomId && userId) {
+        // Remove from call state and notify peers
+        if (roomCallState.get(roomId)?.has(userId)) {
+          roomCallState.get(roomId)!.delete(userId);
+          io.to(roomId).emit("call-left", { userId });
+        }
+
+        // Remove from room members
         const members = roomMembers.get(roomId);
         if (members) {
           members.delete(userId);
-          if (members.size === 0) {
-            roomMembers.delete(roomId);
-          }
+          if (members.size === 0) roomMembers.delete(roomId);
         }
 
         socket.to(roomId).emit("user-left", { userId, userName });
@@ -209,7 +282,6 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         try {
           const sysMsgId = crypto.randomUUID();
           const sysMsgContent = `${userName ?? "Someone"} left the room`;
-
           await db.insert(roomMessagesTable).values({
             id: sysMsgId,
             roomId,
@@ -218,8 +290,6 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
             content: sysMsgContent,
             type: "system",
           });
-
-          // Broadcast leave message to chat
           io.to(roomId).emit("chat-message", {
             id: sysMsgId,
             roomId,
