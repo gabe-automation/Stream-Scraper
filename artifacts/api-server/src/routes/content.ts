@@ -4,18 +4,24 @@ import { requireAuth, requireApproved } from "../middlewares/auth";
 const router = Router();
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
-const TMDB_API_KEY = process.env.TMDB_API_KEY ?? "";
+const TMDB_TOKEN = process.env.TMDB_API_KEY ?? "";
 
 async function tmdb(path: string, params: Record<string, string> = {}) {
-  if (!TMDB_API_KEY) {
+  if (!TMDB_TOKEN) {
     throw new Error("TMDB_API_KEY is not configured");
   }
   const url = new URL(`${TMDB_BASE}${path}`);
-  url.searchParams.set("api_key", TMDB_API_KEY);
   for (const [k, v] of Object.entries(params)) {
     url.searchParams.set(k, v);
   }
-  const res = await fetch(url.toString());
+  // Supports both v3 API keys and v4 Bearer tokens (JWT starting with eyJ)
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (TMDB_TOKEN.startsWith("eyJ")) {
+    headers["Authorization"] = `Bearer ${TMDB_TOKEN}`;
+  } else {
+    url.searchParams.set("api_key", TMDB_TOKEN);
+  }
+  const res = await fetch(url.toString(), { headers });
   if (!res.ok) throw new Error(`TMDB error: ${res.status}`);
   return res.json() as Promise<Record<string, unknown>>;
 }
