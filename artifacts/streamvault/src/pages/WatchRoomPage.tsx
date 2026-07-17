@@ -13,7 +13,8 @@ import { withAuthGuard } from "../components/layout/withAuthGuard";
 import {
   Loader2, Send, Users, MessageSquare, LogOut,
   RefreshCw, ChevronRight, AlertTriangle, Info, Copy, Check, X,
-  Video, VideoOff, Mic, MicOff, PhoneCall, PhoneOff, Settings, Timer
+  Video, VideoOff, Mic, MicOff, PhoneCall, PhoneOff, Settings, Timer,
+  Maximize, Minimize, PanelRightClose, PanelRightOpen
 } from "lucide-react";
 
 // ─── Server definitions ───────────────────────────────────────────────────────
@@ -72,6 +73,12 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
   // Sync Countdown State
   const [syncCountdown, setSyncCountdown] = useState<number | null>(null);
+  const [syncPhase, setSyncPhase] = useState<'counting' | 'play' | null>(null);
+
+  // Sidebar + Fullscreen
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const playerAreaRef = useRef<HTMLDivElement>(null);
 
   const server = SERVERS[serverIdx];
   const embedUrl = room ? server.getUrl(room.contentType as ContentType, room.contentId, room.season ?? undefined, room.episode ?? undefined) : "";
@@ -107,6 +114,21 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     resetHideTimer();
     return () => { if (hideTimer.current) clearTimeout(hideTimer.current); };
   }, [serverIdx, resetHideTimer]);
+
+  // Fullscreen API
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      playerAreaRef.current?.requestFullscreen();
+    } else {
+      document.exitFullscreen();
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFSChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFSChange);
+    return () => document.removeEventListener('fullscreenchange', onFSChange);
+  }, []);
 
   // ----- Chat & Reactions State -----
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -361,11 +383,18 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     // Server relays countdown to all (including host) — show overlay
     s.on("sync-countdown", ({ seconds }: { seconds: number }) => {
       let count = seconds;
+      setSyncPhase('counting');
       setSyncCountdown(count);
       const interval = setInterval(() => {
         count -= 1;
-        if (count > 0) setSyncCountdown(count);
-        else { setSyncCountdown(null); clearInterval(interval); }
+        if (count > 0) {
+          setSyncCountdown(count);
+        } else {
+          clearInterval(interval);
+          setSyncCountdown(null);
+          setSyncPhase('play');
+          setTimeout(() => setSyncPhase(null), 2500);
+        }
       }, 1000);
     });
 
@@ -509,17 +538,32 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     <div className="flex flex-col lg:flex-row h-[calc(100vh-64px)] w-full overflow-hidden bg-background">
 
       {/* Sync Countdown Overlay */}
-      {syncCountdown !== null && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm pointer-events-none">
-          <div className="flex flex-col items-center gap-4">
-            <p className="text-white/60 text-xl font-medium">Get ready to press play…</p>
-            <div
-              className="text-[150px] font-black text-yellow-400 tabular-nums drop-shadow-2xl"
-              style={{ textShadow: "0 0 40px rgba(250,204,21,0.8)" }}
-            >
-              {syncCountdown}
-            </div>
-            <p className="text-white/80 text-2xl font-bold uppercase tracking-widest">Press Play Now!</p>
+      {syncPhase !== null && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-6 select-none">
+            {syncPhase === 'counting' ? (
+              <>
+                <p className="text-white/60 text-xl font-semibold tracking-widest uppercase">Get ready…</p>
+                <div
+                  key={syncCountdown}
+                  className="text-[180px] font-black text-yellow-400 tabular-nums leading-none"
+                  style={{ textShadow: "0 0 60px rgba(250,204,21,0.9), 0 0 120px rgba(250,204,21,0.4)", animation: "countdown-pop 0.25s ease-out" }}
+                >
+                  {syncCountdown}
+                </div>
+                <p className="text-white/40 text-base uppercase tracking-[0.25em] font-medium">Prepare to press play</p>
+              </>
+            ) : (
+              <>
+                <div
+                  className="text-8xl font-black text-green-400 uppercase tracking-tight animate-bounce"
+                  style={{ textShadow: "0 0 50px rgba(74,222,128,0.9), 0 0 100px rgba(74,222,128,0.4)" }}
+                >
+                  ▶ PLAY NOW!
+                </div>
+                <p className="text-white/60 text-lg tracking-wide">Press play on your player</p>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -531,7 +575,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       </div>
 
       {/* Main Video Area */}
-      <div className="flex-1 flex flex-col relative bg-black border-r border-border/50" onMouseMove={resetHideTimer}>
+      <div ref={playerAreaRef} className="flex-1 flex flex-col relative bg-black border-r border-border/50" onMouseMove={resetHideTimer}>
         <div className="flex-1 relative w-full h-full">
           {!loaded && (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black pointer-events-none">
@@ -644,6 +688,24 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                   title="Reload"
                 >
                   <RefreshCw className="w-4 h-4" />
+                </button>
+
+                {/* Fullscreen toggle */}
+                <button
+                  onClick={toggleFullscreen}
+                  className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0 pointer-events-auto"
+                  title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                >
+                  {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+                </button>
+
+                {/* Sidebar toggle */}
+                <button
+                  onClick={() => setShowSidebar((v) => !v)}
+                  className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0 pointer-events-auto"
+                  title={showSidebar ? "Hide chat" : "Show chat"}
+                >
+                  {showSidebar ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
                 </button>
               </div>
             </div>
@@ -858,11 +920,21 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
               </div>
             </div>
           )}
+          {/* Floating sidebar reopen button — only when sidebar is hidden */}
+          {!showSidebar && (
+            <button
+              onClick={() => setShowSidebar(true)}
+              className="absolute bottom-6 right-4 z-30 p-3 rounded-full bg-black/70 hover:bg-black/90 text-white border border-white/20 shadow-2xl backdrop-blur-sm transition-all pointer-events-auto"
+              title="Show chat"
+            >
+              <PanelRightOpen className="w-5 h-5" />
+            </button>
+          )}
         </div>
       </div>
 
       {/* Sidebar */}
-      <div className="w-full lg:w-96 flex flex-col bg-card border-l border-border/50 h-full">
+      {showSidebar && <div className="w-full lg:w-96 flex flex-col bg-card border-l border-border/50 h-full">
         {/* Active call banner — shown when others are on a call and you haven't joined */}
         {activeCallers.length > 0 && !inCall && (
           <div className="mx-3 mt-3 p-3 rounded-xl bg-green-950/60 border border-green-600/40 flex flex-col gap-2">
@@ -1058,7 +1130,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
             ))}
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
