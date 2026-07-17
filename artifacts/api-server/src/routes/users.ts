@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db, usersTable } from "@workspace/db";
 import { eq, desc, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, type AuthRequest } from "../middlewares/auth";
+import { getIO } from "../socket";
 
 const router = Router();
 
@@ -92,6 +93,20 @@ router.patch("/:id", requireAuth, requireAdmin, async (req: AuthRequest, res) =>
     return;
   }
 
+  // Push real-time updates so clients react immediately
+  const io = getIO();
+  if (io) {
+    // Tell the affected user their status changed → they'll refetch /me
+    io.to(`user:${updated.clerkId}`).emit("user-updated", {
+      id: updated.id,
+      clerkId: updated.clerkId,
+      role: updated.role,
+      isApproved: updated.isApproved,
+    });
+    // Tell all admins to refresh their user list
+    io.emit("admin-users-changed", {});
+  }
+
   res.json({
     id: updated.id,
     clerkId: updated.clerkId,
@@ -116,6 +131,13 @@ router.delete("/:id", requireAuth, requireAdmin, async (req: AuthRequest, res) =
   if (!deleted) {
     res.status(404).json({ error: "User not found" });
     return;
+  }
+
+  // Tell the deleted user to sign out, and all admins to refresh
+  const io = getIO();
+  if (io) {
+    io.to(`user:${deleted.clerkId}`).emit("user-deleted", { id: deleted.id });
+    io.emit("admin-users-changed", {});
   }
 
   res.json({ message: "User deleted" });

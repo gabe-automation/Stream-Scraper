@@ -66,6 +66,10 @@ router.post("/", requireAuth, requireApproved, async (req: AuthRequest, res) => 
     })
     .returning();
 
+  // Broadcast so all room-list views update instantly
+  const io = getIO();
+  if (io) io.emit("rooms-list-changed", {});
+
   res.status(201).json(serializeRoom(room));
 });
 
@@ -105,7 +109,11 @@ router.delete("/:id", requireAuth, requireApproved, async (req: AuthRequest, res
 
   // Notify all room members in real time so they get redirected immediately
   const io = getIO();
-  if (io) io.to(roomId).emit("room-closed", { roomId });
+  if (io) {
+    io.to(roomId).emit("room-closed", { roomId });
+    // Update the rooms list for everyone on the rooms page
+    io.emit("rooms-list-changed", {});
+  }
 
   res.json({ message: "Room closed" });
 });

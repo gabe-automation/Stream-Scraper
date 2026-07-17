@@ -4,11 +4,12 @@ import { requireAuth, requireApproved } from "../middlewares/auth";
 const router = Router();
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
-const TMDB_TOKEN = process.env.TMDB_API_KEY ?? "";
 
+// Read per-request so the env var is always fresh (avoids stale module-level capture)
 async function tmdb(path: string, params: Record<string, string> = {}) {
-  if (!TMDB_TOKEN) {
-    throw new Error("TMDB_API_KEY is not configured");
+  const token = process.env.TMDB_API_KEY?.trim();
+  if (!token) {
+    throw new Error("TMDB_API_KEY is not configured. Add it as a secret in the environment settings.");
   }
   const url = new URL(`${TMDB_BASE}${path}`);
   for (const [k, v] of Object.entries(params)) {
@@ -16,13 +17,16 @@ async function tmdb(path: string, params: Record<string, string> = {}) {
   }
   // Supports both v3 API keys and v4 Bearer tokens (JWT starting with eyJ)
   const headers: Record<string, string> = { accept: "application/json" };
-  if (TMDB_TOKEN.startsWith("eyJ")) {
-    headers["Authorization"] = `Bearer ${TMDB_TOKEN}`;
+  if (token.startsWith("eyJ")) {
+    headers["Authorization"] = `Bearer ${token}`;
   } else {
-    url.searchParams.set("api_key", TMDB_TOKEN);
+    url.searchParams.set("api_key", token);
   }
   const res = await fetch(url.toString(), { headers });
-  if (!res.ok) throw new Error(`TMDB error: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`TMDB API error ${res.status}: ${body.slice(0, 200)}`);
+  }
   return res.json() as Promise<Record<string, unknown>>;
 }
 

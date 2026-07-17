@@ -7,6 +7,7 @@ import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { queryClient } from "./lib/queryClient";
 
 import Shell from "./components/layout/Shell";
+import { useSystemSocket } from "./hooks/useSystemSocket";
 import LandingPage from "./pages/LandingPage";
 import BrowsePage from "./pages/BrowsePage";
 import MoviePage from "./pages/MoviePage";
@@ -111,8 +112,15 @@ function HomeRedirect() {
   );
 }
 
+function SystemSocketBridge() {
+  useSystemSocket();
+  return null;
+}
+
 function AppRouter() {
   return (
+    <>
+    <SystemSocketBridge />
     <Shell>
       <Switch>
         <Route path="/" component={HomeRedirect} />
@@ -141,6 +149,7 @@ function AppRouter() {
         </Route>
       </Switch>
     </Shell>
+    </>
   );
 }
 

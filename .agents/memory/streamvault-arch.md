@@ -27,6 +27,13 @@ description: Key decisions and gotchas for the StreamVault private streaming app
 ## Content
 - TMDB API key stored as secret `TMDB_API_KEY`
 - Embed URL pattern: `https://vidsrc.to/embed/movie/{id}` or `.../tv/{id}/{season}/{episode}`
+- TMDB token must be read per-request inside `tmdb()`, NOT as a module-level const — the module loads before the secret is in `process.env` after a cold start.
+
+## Real-time push (system-wide)
+- `socket.ts` has an `identify` event: client emits its Clerk ID → server does `socket.join("user:<clerkId>")`.
+- Routes emit to `user:<clerkId>` for targeted user events, and broadcast for list changes.
+- `useSystemSocket` hook (`src/hooks/useSystemSocket.ts`) manages a singleton socket, wired in `App.tsx` via `<SystemSocketBridge />`.
+- Events: `user-updated` → refetch /me, `user-deleted` → sign out, `admin-users-changed` → refetch /api/users, `rooms-list-changed` → refetch /api/rooms.
 
 ## Presence / chat join-leave design
 - Join/leave system messages are NOT persisted to DB — they are ephemeral socket events only.

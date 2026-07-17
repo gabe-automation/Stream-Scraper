@@ -44,6 +44,16 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
   io.on("connection", (socket) => {
     logger.info({ socketId: socket.id }, "Socket connected");
 
+    // ─── System identify (global per-user room) ──────────────────────────────
+    // Client emits this right after connecting so we can target events at them.
+    socket.on("identify", (clerkId: string) => {
+      if (!clerkId || typeof clerkId !== "string") return;
+      const room = `user:${clerkId}`;
+      socket.join(room);
+      socket.data.clerkId = clerkId;
+      logger.debug({ socketId: socket.id, clerkId }, "Socket identified");
+    });
+
     // ─── Join room ──────────────────────────────────────────────────────────
     socket.on(
       "join-room",
