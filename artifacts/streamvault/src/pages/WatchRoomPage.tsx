@@ -13,7 +13,7 @@ import { withAuthGuard } from "../components/layout/withAuthGuard";
 import {
   Loader2, Send, Users, MessageSquare, LogOut,
   RefreshCw, ChevronRight, AlertTriangle, Info, Copy, Check, X,
-  Video, VideoOff, Mic, MicOff, PhoneCall, PhoneOff, Settings
+  Video, VideoOff, Mic, MicOff, PhoneCall, PhoneOff, Settings, Timer
 } from "lucide-react";
 
 // ─── Server definitions ───────────────────────────────────────────────────────
@@ -67,6 +67,9 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const [selectorPosition, setSelectorPosition] = useState<'bottom' | 'top' | 'right'>('bottom');
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
 
+  // 🌟 Sync Countdown State
+  const [syncCountdown, setSyncCountdown] = useState<number | null>(null);
+
   const server = SERVERS[serverIdx];
   const embedUrl = room ? server.getUrl(room.contentType as ContentType, room.contentId, room.season ?? undefined, room.episode ?? undefined) : "";
 
@@ -96,6 +99,17 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const [floatingReactions, setFloatingReactions] = useState<{ id: number; emoji: string; x: number }[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [linkCopied, setLinkCopied] = useState(false);
+
+  // 🌟 Safe Message Adder (Prevents duplicate join/leave spam without removing your logic)
+  const addMessage = useCallback((msg: ChatMessage) => {
+    setMessages((prev) => {
+      if (msg.type === 'system') {
+        const lastMsg = prev[prev.length - 1];
+        if (lastMsg && lastMsg.type === 'system' && lastMsg.content === msg.content) return prev;
+      }
+      return [...prev, msg];
+    });
+  }, []);
 
   // ----- WebRTC Call State -----
   const [inCall, setInCall] = useState(false);
@@ -129,12 +143,13 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       trickle: true,
       stream: localStreamRef.current || undefined,
       config: {
+        // 🌟 Robust ICE servers for strict networks
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' }
+          { urls: 'stun:global.stun.twilio.com:3478' },
+          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
         ]
       }
     });
@@ -147,6 +162,15 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       const conn = peersRef.current.get(peerId);
       if (conn) {
         conn.stream = remoteStream;
+        forcePeerRerender((n) => n + 1);
+      }
+    });
+
+    // 🌟 Fallback for modern browsers that emit 'track' instead of 'stream'
+    peer.on("track", (track: any, stream: MediaStream) => {
+      const conn = peersRef.current.get(peerId);
+      if (conn && stream) {
+        conn.stream = stream;
         forcePeerRerender((n) => n + 1);
       }
     });
@@ -185,7 +209,8 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
       participants.forEach((p) => {
         if (p.id === user?.id) return;
-        createPeerConnection(p.id, p.name, true);
+        // 🌟 FIXED: Only initiate if our ID is "less than" theirs to prevent double-dialing glare
+        createPeerConnection(p.id, p.name, user!.id < p.id);
       });
     } catch (err) {
       alert("Could not access camera/microphone. Please check browser permissions.");
@@ -226,6 +251,11 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     setTimeout(() => setLinkCopied(false), 2000);
   };
 
+  // 🌟 Host Sync Countdown Trigger
+  const startSyncCountdown = () => {
+    socket?.emit("sync-countdown", { roomId, seconds: 5 });
+  };
+
   useEffect(() => {
     return () => { localStreamRef.current?.getTracks().forEach((t) => t.stop()); };
   }, []);
@@ -239,26 +269,42 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     const s = io({ path: "/ws/socket.io", query: { roomId, userId: user.id, userName: user.fullName || user.firstName || "Anonymous" } });
 
     s.on("connect", () => s.emit("join-room", { roomId, userId: user.id, userName: user.fullName || user.firstName || "Anonymous" }));
-    s.on("chat-message", (msg: ChatMessage) => setMessages((prev) => [...prev, msg]));
+
+    s.on("chat-message", (msg: ChatMessage) => addMessage(msg));
+
     s.on("reaction", ({ emoji }: { emoji: string }) => {
       const id = Date.now() + Math.random();
       setFloatingReactions((prev) => [...prev, { id, emoji, x: Math.random() * 80 + 10 }]);
       setTimeout(() => setFloatingReactions((prev) => prev.filter((r) => r.id !== id)), 3000);
     });
 
+    // 🌟 Listen for Sync Countdown
+    s.on("sync-countdown", ({ seconds }: { seconds: number }) => {
+      let count = seconds;
+      setSyncCountdown(count);
+      const interval = setInterval(() => {
+        count -= 1;
+        if (count > 0) setSyncCountdown(count);
+        else { setSyncCountdown(null); clearInterval(interval); }
+      }, 1000);
+    });
+
     s.on("user-joined", ({ userId, userName }: { userId: string; userName: string }) => {
       setParticipants((prev) => (prev.find((p) => p.id === userId) ? prev : [...prev, { id: userId, name: userName }]));
-      setMessages((prev) => [...prev, { id: Date.now().toString(), roomId, userId: "system", userName: "System", userAvatar: null, content: `${userName} joined the room`, type: "system", createdAt: new Date().toISOString() } as ChatMessage]);
 
-      if (inCallRef.current && localStreamRef.current && userId !== user.id && userId < user.id) {
-        createPeerConnection(userId, userName, true);
+      // Kept your manual system message append, but routed through addMessage to prevent duplicates
+      addMessage({ id: Date.now().toString(), roomId, userId: "system", userName: "System", userAvatar: null, content: `${userName} joined the room`, type: "system", createdAt: new Date().toISOString() } as ChatMessage);
+
+      if (inCallRef.current && localStreamRef.current && userId !== user.id) {
+        // 🌟 FIXED: Only initiate if our ID is "less than" theirs
+        createPeerConnection(userId, userName, user.id < userId);
       }
     });
 
     s.on("user-left", ({ userId, userName }: { userId: string; userName: string }) => {
       setParticipants((prev) => prev.filter((p) => p.id !== userId));
       destroyPeerConnection(userId);
-      setMessages((prev) => [...prev, { id: Date.now().toString(), roomId, userId: "system", userName: "System", userAvatar: null, content: `${userName} left the room`, type: "system", createdAt: new Date().toISOString() } as ChatMessage]);
+      addMessage({ id: Date.now().toString(), roomId, userId: "system", userName: "System", userAvatar: null, content: `${userName} left the room`, type: "system", createdAt: new Date().toISOString() } as ChatMessage);
     });
 
     s.on("webrtc-signal", ({ from, fromName, signal }: { from: string; fromName: string; signal: any }) => {
@@ -274,7 +320,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       peersRef.current.forEach((conn) => conn.peer.destroy());
       peersRef.current.clear();
     };
-  }, [user, roomId]);
+  }, [user, roomId, addMessage]);
 
   // ---------------------------------------------------------------------
   // Chat / Room Actions
@@ -300,6 +346,20 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
   return (
     <div className="flex flex-col lg:flex-row h-[calc(100vh-64px)] w-full overflow-hidden bg-background">
+
+      {/* 🌟 Giant Sync Countdown Overlay */}
+      {syncCountdown !== null && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm pointer-events-none">
+          <div className="flex flex-col items-center gap-4">
+            <p className="text-white/60 text-xl font-medium">Get ready to press play...</p>
+            <div className="text-[150px] font-black text-yellow-400 tabular-nums drop-shadow-2xl" style={{ textShadow: '0 0 40px rgba(250,204,21,0.8)' }}>
+              {syncCountdown}
+            </div>
+            <p className="text-white/80 text-2xl font-bold uppercase tracking-widest">Press Play Now!</p>
+          </div>
+        </div>
+      )}
+
       <div className="pointer-events-none fixed inset-0 z-[100] overflow-hidden">
         {floatingReactions.map((r) => (
           <div key={r.id} className="absolute bottom-20 text-4xl animate-float-up" style={{ left: `${r.x}%` }}>{r.emoji}</div>
@@ -316,11 +376,12 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
             </div>
           )}
 
+          {/* 🌟 allow-popups added back so embed providers can verify the user */}
           <iframe
             key={iframeKey}
             src={embedUrl}
             allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-presentation"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups"
             allowFullScreen
             referrerPolicy="no-referrer"
             className="w-full h-full border-0 absolute inset-0 z-0"
@@ -339,6 +400,13 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                   <h2 className="text-white font-bold text-sm truncate">{room.name}</h2>
                   <p className="text-white/60 text-xs truncate">{room.contentTitle}</p>
                 </div>
+
+                {/* 🌟 Host Sync Button */}
+                {isHost && (
+                  <button onClick={startSyncCountdown} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg" title="Start 5s Countdown for everyone to press play">
+                    <Timer className="w-3.5 h-3.5" /> Sync Play
+                  </button>
+                )}
 
                 <button onClick={() => setShowInfo(true)} className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0 pointer-events-auto" title="Player Info">
                   <Info className="w-4 h-4" />
@@ -478,7 +546,8 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
               <div className="grid grid-cols-2 gap-2">
                 <div className="relative w-24 h-16 bg-secondary rounded-md overflow-hidden">
                   {callType === 'video' && camOn ? (
-                    <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
+                    // 🌟 FIXED: scaleX(-1) mirrors the camera so it's not inverted
+                    <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-white text-xl font-bold bg-primary/20">
                       {user?.firstName?.charAt(0) || 'Y'}
@@ -637,15 +706,47 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   );
 }
 
+// 🌟 FIXED: Handles browser autoplay blocks for remote audio/video
 function RemoteVideoTile({ stream }: { stream: MediaStream }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const [audioBlocked, setAudioBlocked] = useState(false);
+
   useEffect(() => {
     if (ref.current && stream) {
       ref.current.srcObject = stream;
-      ref.current.play().catch(e => console.log("Autoplay blocked", e));
+      const playPromise = ref.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((e) => {
+          console.log("Autoplay blocked, muting video to allow playback");
+          setAudioBlocked(true);
+          ref.current!.muted = true;
+          ref.current!.play().catch(() => {});
+        });
+      }
     }
   }, [stream]);
-  return <video ref={ref} autoPlay playsInline className="w-full h-full object-cover" />;
+
+  const handleUnmute = () => {
+    if (ref.current) {
+      ref.current.muted = false;
+      ref.current.play().then(() => setAudioBlocked(false)).catch(() => {});
+    }
+  };
+
+  return (
+    <div className="relative w-full h-full group">
+      <video ref={ref} autoPlay playsInline className="w-full h-full object-cover cursor-pointer" onClick={handleUnmute} />
+      {audioBlocked && (
+        <button 
+          onClick={handleUnmute} 
+          className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white text-[10px] font-bold gap-1 hover:bg-black/40 transition-colors"
+        >
+          <MicOff className="w-4 h-4" />
+          Tap for Audio
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default withAuthGuard(WatchRoomPageContent);
