@@ -455,7 +455,6 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
           allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
           allowFullScreen
           referrerPolicy="no-referrer"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-pointer-lock allow-downloads"
           className="w-full h-full border-0"
           title="Watch Party Player"
           onLoad={() => setIframeLoaded(true)}

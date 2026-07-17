@@ -82,7 +82,6 @@ export function VideoPlayer({ type, id, season, episode, label, onClose }: Video
         allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
         allowFullScreen
         referrerPolicy="no-referrer"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-pointer-lock allow-downloads"
         className="w-full h-full border-0"
         title="Player"
         onLoad={() => setLoaded(true)}
