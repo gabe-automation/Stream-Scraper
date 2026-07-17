@@ -17,6 +17,12 @@ const roomMembers = new Map<string, Map<string, RoomMember>>();
 // In-memory call state: roomId → Map<userId, userName>
 const roomCallState = new Map<string, Map<string, string>>();
 
+// Grace-period disconnect timers: "roomId:userId" → timer
+// Absorbs quick reconnects (Clerk auth refreshes, network blips) so users
+// don't see "X joined / X left / X joined" spam in chat.
+const DISCONNECT_GRACE_MS = 8_000;
+const disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 // Module-level IO reference so routes can emit events
 let _io: SocketIOServer | null = null;
 
@@ -41,7 +47,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
     // ─── Join room ──────────────────────────────────────────────────────────
     socket.on(
       "join-room",
-      async ({
+      ({
         roomId,
         userId,
         userName,
@@ -52,87 +58,71 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         userName: string;
         userAvatar?: string | null;
       }) => {
+        if (!roomId || !userId) return;
+
         socket.join(roomId);
-
-        if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Map());
-        const members = roomMembers.get(roomId)!;
-        members.set(userId, {
-          userId,
-          userName,
-          userAvatar: userAvatar ?? null,
-          socketId: socket.id,
-        });
-
         socket.data.roomId = roomId;
         socket.data.userId = userId;
         socket.data.userName = userName;
 
-        // Notify existing members of new joiner
-        socket.to(roomId).emit("user-joined", { userId, userName });
+        if (!roomMembers.has(roomId)) roomMembers.set(roomId, new Map());
+        const members = roomMembers.get(roomId)!;
 
-        // Send full member list to the new joiner
+        const presenceKey = `${roomId}:${userId}`;
+        const pendingDisconnect = disconnectTimers.get(presenceKey);
+
+        if (pendingDisconnect !== undefined) {
+          // User reconnected within the grace period — cancel the leave timer,
+          // update their socket ID silently without broadcasting join/leave.
+          clearTimeout(pendingDisconnect);
+          disconnectTimers.delete(presenceKey);
+          const existing = members.get(userId);
+          if (existing) {
+            members.set(userId, { ...existing, socketId: socket.id });
+          } else {
+            members.set(userId, { userId, userName, userAvatar: userAvatar ?? null, socketId: socket.id });
+          }
+          logger.info({ roomId, userId }, "User silently reconnected (within grace period)");
+        } else {
+          // Genuine new join — add to members and notify the room
+          members.set(userId, { userId, userName, userAvatar: userAvatar ?? null, socketId: socket.id });
+          socket.to(roomId).emit("user-joined", { userId, userName });
+          logger.info({ roomId, userId, userName }, "User joined room");
+        }
+
+        // Send full member + caller state to the (re)joining socket
         const memberList = Array.from(members.values()).map((m) => ({
           id: m.userId,
           name: m.userName,
           userAvatar: m.userAvatar,
         }));
-        // Include who is currently on a call so Gabriel can see it immediately
         const currentCallers = roomCallState.has(roomId)
           ? Array.from(roomCallState.get(roomId)!.entries()).map(([id, name]) => ({ id, name }))
           : [];
         socket.emit("room-state", { members: memberList, callers: currentCallers });
-
-        // System message
-        try {
-          const sysMsgId = crypto.randomUUID();
-          const sysMsgContent = `${userName} joined the room`;
-          await db.insert(roomMessagesTable).values({
-            id: sysMsgId,
-            roomId,
-            userId: "system",
-            userName: "System",
-            content: sysMsgContent,
-            type: "system",
-          });
-          io.to(roomId).emit("chat-message", {
-            id: sysMsgId,
-            roomId,
-            userId: "system",
-            userName: "System",
-            userAvatar: null,
-            content: sysMsgContent,
-            type: "system",
-            createdAt: new Date().toISOString(),
-          });
-        } catch (err) {
-          logger.error({ err }, "Failed to save join message");
-        }
-
-        logger.info({ roomId, userId, userName }, "User joined room");
       },
     );
 
     // ─── Sync countdown relay ───────────────────────────────────────────────
-    // Host emits this; server relays to all room members (including host)
     socket.on(
       "sync-countdown",
       ({ roomId, seconds }: { roomId: string; seconds: number }) => {
+        if (!roomId || typeof seconds !== "number") return;
         io.to(roomId).emit("sync-countdown", { seconds });
       },
     );
 
     // ─── Host action relay ──────────────────────────────────────────────────
-    // Used for server selection changes; relayed to all non-host members
+    // Used for server-selection changes; relayed to all non-host members.
     socket.on(
       "host-action",
       ({ roomId, action }: { roomId: string; action: unknown }) => {
+        if (!roomId) return;
         socket.to(roomId).emit("host-action", action);
       },
     );
 
     // ─── WebRTC call signaling ──────────────────────────────────────────────
-    // Emitted when a user joins the call; server replies with current callers,
-    // then broadcasts call-joined so existing callers can open a peer connection.
     socket.on(
       "call-joined",
       ({
@@ -144,6 +134,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         userId: string;
         userName: string;
       }) => {
+        if (!roomId || !userId) return;
         if (!roomCallState.has(roomId)) roomCallState.set(roomId, new Map());
         const callers = roomCallState.get(roomId)!;
 
@@ -153,10 +144,8 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
           .map(([id, name]) => ({ id, name }));
         socket.emit("call-state", { callers: existingCallers });
 
-        // Register this user
+        // Register this user and tell others to open a peer connection
         callers.set(userId, userName);
-
-        // Tell existing callers to open a peer connection
         socket.to(roomId).emit("call-joined", { userId, userName });
 
         logger.info({ roomId, userId }, "User joined call");
@@ -166,6 +155,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
     socket.on(
       "call-left",
       ({ roomId, userId }: { roomId: string; userId: string }) => {
+        if (!roomId || !userId) return;
         roomCallState.get(roomId)?.delete(userId);
         socket.to(roomId).emit("call-left", { userId });
         logger.info({ roomId, userId }, "User left call");
@@ -188,6 +178,8 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         userAvatar?: string | null;
         content: string;
       }) => {
+        if (!roomId || !userId || !content?.trim()) return;
+
         const messageId = crypto.randomUUID();
         const createdAt = new Date().toISOString();
         const msg = {
@@ -196,7 +188,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
           userId,
           userName,
           userAvatar: userAvatar ?? null,
-          content,
+          content: content.trim(),
           type: "text" as const,
           createdAt,
         };
@@ -207,7 +199,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
             roomId,
             userId,
             userName,
-            content,
+            content: content.trim(),
             type: "text",
           });
         } catch (err) {
@@ -230,6 +222,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         userName: string;
         emoji: string;
       }) => {
+        if (!roomId || !emoji) return;
         io.to(roomId).emit("reaction", { userId, userName, emoji });
       },
     );
@@ -250,66 +243,59 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         fromName: string;
         signal: unknown;
       }) => {
+        if (!roomId || !to || !from) return;
         const members = roomMembers.get(roomId);
         if (members) {
           const target = members.get(to);
           if (target) {
-            io.to(target.socketId).emit("webrtc-signal", {
-              from,
-              fromName,
-              signal,
-            });
+            io.to(target.socketId).emit("webrtc-signal", { from, fromName, signal });
           }
         }
       },
     );
 
     // ─── Disconnect ──────────────────────────────────────────────────────────
-    socket.on("disconnect", async () => {
-      const { roomId, userId, userName } = socket.data;
-      if (roomId && userId) {
-        // Remove from call state and notify peers
-        if (roomCallState.get(roomId)?.has(userId)) {
+    socket.on("disconnect", () => {
+      const { roomId, userId, userName } = socket.data as {
+        roomId?: string;
+        userId?: string;
+        userName?: string;
+      };
+      if (!roomId || !userId) return;
+
+      logger.info({ socketId: socket.id, roomId, userId }, "Socket disconnected — grace period started");
+
+      // Call state: remove immediately (no grace period; call peers need to know now)
+      if (roomCallState.get(roomId)?.has(userId)) {
+        const current = roomMembers.get(roomId)?.get(userId);
+        if (current?.socketId === socket.id) {
           roomCallState.get(roomId)!.delete(userId);
           io.to(roomId).emit("call-left", { userId });
         }
-
-        // Remove from room members
-        const members = roomMembers.get(roomId);
-        if (members) {
-          members.delete(userId);
-          if (members.size === 0) roomMembers.delete(roomId);
-        }
-
-        socket.to(roomId).emit("user-left", { userId, userName });
-
-        try {
-          const sysMsgId = crypto.randomUUID();
-          const sysMsgContent = `${userName ?? "Someone"} left the room`;
-          await db.insert(roomMessagesTable).values({
-            id: sysMsgId,
-            roomId,
-            userId: "system",
-            userName: "System",
-            content: sysMsgContent,
-            type: "system",
-          });
-          io.to(roomId).emit("chat-message", {
-            id: sysMsgId,
-            roomId,
-            userId: "system",
-            userName: "System",
-            userAvatar: null,
-            content: sysMsgContent,
-            type: "system",
-            createdAt: new Date().toISOString(),
-          });
-        } catch (err) {
-          logger.error({ err }, "Failed to save leave message");
-        }
       }
 
-      logger.info({ socketId: socket.id }, "Socket disconnected");
+      // Presence: defer for DISCONNECT_GRACE_MS to absorb quick reconnects
+      const presenceKey = `${roomId}:${userId}`;
+      const existing = disconnectTimers.get(presenceKey);
+      if (existing) clearTimeout(existing);
+
+      const timer = setTimeout(() => {
+        disconnectTimers.delete(presenceKey);
+
+        // Only act if this socket is still the registered one (they haven't reconnected)
+        const members = roomMembers.get(roomId);
+        const current = members?.get(userId);
+        if (!current || current.socketId !== socket.id) return;
+
+        members!.delete(userId);
+        if (members!.size === 0) roomMembers.delete(roomId);
+
+        // Broadcast user-left with userName so clients can show a notification
+        io.to(roomId).emit("user-left", { userId, userName: userName ?? "Someone" });
+        logger.info({ roomId, userId }, "User left room (grace period elapsed)");
+      }, DISCONNECT_GRACE_MS);
+
+      disconnectTimers.set(presenceKey, timer);
     });
   });
 

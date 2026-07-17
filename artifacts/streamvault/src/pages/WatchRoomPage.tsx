@@ -115,6 +115,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const [floatingReactions, setFloatingReactions] = useState<{ id: number; emoji: string; x: number }[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
 
   // Safe dedup message adder
   const addMessage = useCallback((msg: ChatMessage) => {
@@ -179,11 +180,13 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     });
 
     peer.on("signal", (signal: any) => {
+      const uid = user?.id;
+      if (!uid) return;
       socketRef.current?.emit("webrtc-signal", {
         roomId,
         to: peerId,
-        from: user!.id,
-        fromName: user!.fullName || user!.firstName || "Anonymous",
+        from: uid,
+        fromName: user?.fullName || user?.firstName || "Anonymous",
         signal,
       });
     });
@@ -237,6 +240,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   useEffect(() => { switchToRef.current = switchTo; }, [switchTo]);
 
   const joinCall = async (type: 'audio' | 'video') => {
+    setMediaError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
@@ -251,18 +255,28 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
       // Tell server we joined — it will reply with call-state (existing callers)
       // and broadcast call-joined to everyone else so they open peer connections to us.
+      const uid = user?.id;
+      if (!uid) return;
       socketRef.current?.emit("call-joined", {
         roomId,
-        userId: user!.id,
-        userName: user!.fullName || user!.firstName || "Anonymous",
+        userId: uid,
+        userName: user?.fullName || user?.firstName || "Anonymous",
       });
-    } catch {
-      alert("Could not access camera/microphone. Please check browser permissions.");
+    } catch (err) {
+      const isDenied =
+        err instanceof DOMException &&
+        (err.name === "NotAllowedError" || err.name === "PermissionDeniedError");
+      setMediaError(
+        isDenied
+          ? "Camera/microphone access was denied. Allow permissions in your browser and try again."
+          : "Could not access camera or microphone. Make sure your device is connected.",
+      );
     }
   };
 
   const leaveCall = useCallback(() => {
-    socketRef.current?.emit("call-left", { roomId, userId: user!.id });
+    const uid = user?.id;
+    if (uid) socketRef.current?.emit("call-left", { roomId, userId: uid });
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     setLocalStream(null);
@@ -359,10 +373,34 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       setParticipants((prev) =>
         prev.find((p) => p.id === uid) ? prev : [...prev, { id: uid, name: userName }]
       );
+      // Show transient presence notification in chat (not persisted to DB)
+      if (uid !== userId) {
+        addMessageRef.current({
+          id: `presence-join-${uid}-${Date.now()}`,
+          roomId,
+          userId: "system",
+          userName: "System",
+          userAvatar: null,
+          content: `${userName} joined the room`,
+          type: "system",
+          createdAt: new Date().toISOString(),
+        });
+      }
     });
 
-    s.on("user-left", ({ userId: uid }: { userId: string }) => {
+    s.on("user-left", ({ userId: uid, userName: leftName }: { userId: string; userName?: string }) => {
       setParticipants((prev) => prev.filter((p) => p.id !== uid));
+      // Show transient presence notification in chat
+      addMessageRef.current({
+        id: `presence-left-${uid}-${Date.now()}`,
+        roomId,
+        userId: "system",
+        userName: "System",
+        userAvatar: null,
+        content: `${leftName ?? "Someone"} left the room`,
+        type: "system",
+        createdAt: new Date().toISOString(),
+      });
     });
 
     // Someone joined the call — update the visible callers list for everyone.
@@ -407,7 +445,12 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       if (!localStreamRef.current) return;
       let conn = peersRef.current.get(from);
       if (!conn) conn = createPeerRef.current(from, fromName, false);
-      conn.peer.signal(signal);
+      try { conn.peer.signal(signal); } catch { /* ignore stale signals */ }
+    });
+
+    // Connection error — log to console so it's visible in DevTools
+    s.on("connect_error", (err) => {
+      console.error("[StreamVault] Socket connection error:", err.message);
     });
 
     return () => {
@@ -698,20 +741,28 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
             </>
           )}
 
-          {/* Floating Call Grid (Picture-in-Picture) */}
+          {/* Floating Call Panel (Picture-in-Picture) */}
           {inCall && (
-            <div className="absolute bottom-28 right-4 z-30 bg-black/80 backdrop-blur-md rounded-xl p-3 shadow-2xl border border-white/10 flex flex-col gap-2 max-w-xs pointer-events-auto">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-white text-xs font-bold uppercase tracking-wider flex items-center gap-1.5">
-                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                  {callType === 'video' ? 'Video Call' : 'Voice Call'}
+            <div className="absolute bottom-24 right-4 z-30 w-[180px] bg-zinc-950/95 backdrop-blur-md rounded-2xl shadow-2xl border border-white/10 flex flex-col overflow-hidden pointer-events-auto">
+              {/* Header */}
+              <div className="flex items-center justify-between px-3 py-2 border-b border-white/10 bg-black/40">
+                <span className="text-white text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
+                  {callType === 'video' ? 'Video' : 'Voice'}
                 </span>
-                <button onClick={leaveCall} className="text-red-400 hover:text-red-300 text-xs font-semibold">Leave</button>
+                <button
+                  onClick={leaveCall}
+                  className="p-1 rounded-full hover:bg-red-500/20 text-red-400 hover:text-red-300 transition-colors"
+                  title="Leave call"
+                >
+                  <PhoneOff className="w-3 h-3" />
+                </button>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              {/* Video tiles — stacked vertically */}
+              <div className="flex flex-col divide-y divide-white/5">
                 {/* Local tile */}
-                <div className="relative w-24 h-16 bg-secondary rounded-md overflow-hidden">
+                <div className="relative w-full h-[112px] bg-zinc-900">
                   {callType === 'video' && camOn ? (
                     <video
                       ref={localVideoRef}
@@ -722,41 +773,52 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                       style={{ transform: 'scaleX(-1)' }}
                     />
                   ) : (
-                    <div className="w-full h-full flex items-center justify-center text-white text-xl font-bold bg-primary/20">
-                      {user?.firstName?.charAt(0) || 'Y'}
+                    <div className="w-full h-full flex items-center justify-center bg-primary/10">
+                      <div className="w-10 h-10 rounded-full bg-primary/30 flex items-center justify-center text-white text-base font-bold">
+                        {user?.firstName?.charAt(0) || 'Y'}
+                      </div>
                     </div>
                   )}
-                  <span className="absolute bottom-0 left-0 bg-black/60 text-white text-[9px] px-1">You</span>
+                  {/* Name + mic status */}
+                  <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-2 py-1.5 flex items-center justify-between">
+                    <span className="text-white text-[10px] font-semibold">You</span>
+                    {!micOn && <MicOff className="w-3 h-3 text-red-400 flex-shrink-0" />}
+                  </div>
                 </div>
 
                 {/* Remote tiles */}
                 {Array.from(peersRef.current.values()).map((conn) => (
-                  <div key={conn.peerId} className="relative w-24 h-16 bg-secondary rounded-md overflow-hidden">
+                  <div key={conn.peerId} className="relative w-full h-[112px] bg-zinc-900">
                     {conn.stream ? (
                       <RemoteVideoTile stream={conn.stream} />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-white text-xl font-bold bg-primary/20">
-                        {conn.userName.charAt(0)}
+                      <div className="w-full h-full flex items-center justify-center bg-primary/10">
+                        <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center text-white text-base font-bold border border-white/10">
+                          {conn.userName.charAt(0)}
+                        </div>
                       </div>
                     )}
-                    <span className="absolute bottom-0 left-0 bg-black/60 text-white text-[9px] px-1 truncate max-w-full">{conn.userName}</span>
+                    <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-2 py-1.5">
+                      <span className="text-white text-[10px] font-semibold truncate block">{conn.userName}</span>
+                    </div>
                   </div>
                 ))}
               </div>
 
-              <div className="flex justify-center gap-3 mt-1">
+              {/* Controls */}
+              <div className="flex justify-center gap-2 p-2 border-t border-white/10 bg-black/40">
                 <button
                   onClick={toggleMic}
-                  className={`p-1.5 rounded-full ${micOn ? 'bg-white/10 text-white' : 'bg-red-500 text-white'}`}
-                  title={micOn ? "Mute" : "Unmute"}
+                  className={`p-2 rounded-full transition-colors ${micOn ? 'bg-white/10 hover:bg-white/20 text-white' : 'bg-red-500 hover:bg-red-600 text-white'}`}
+                  title={micOn ? "Mute mic" : "Unmute mic"}
                 >
                   {micOn ? <Mic className="w-3.5 h-3.5" /> : <MicOff className="w-3.5 h-3.5" />}
                 </button>
                 {callType === 'video' && (
                   <button
                     onClick={toggleCam}
-                    className={`p-1.5 rounded-full ${camOn ? 'bg-white/10 text-white' : 'bg-red-500 text-white'}`}
-                    title={camOn ? "Hide camera" : "Show camera"}
+                    className={`p-2 rounded-full transition-colors ${camOn ? 'bg-white/10 hover:bg-white/20 text-white' : 'bg-red-500 hover:bg-red-600 text-white'}`}
+                    title={camOn ? "Turn off camera" : "Turn on camera"}
                   >
                     {camOn ? <Video className="w-3.5 h-3.5" /> : <VideoOff className="w-3.5 h-3.5" />}
                   </button>
@@ -830,29 +892,62 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
         )}
 
         {/* Call Controls */}
-        <div className="p-3 border-b border-border/50 flex items-center gap-2">
-          {!inCall ? (
-            <>
+        <div className="px-3 pt-3 pb-2 border-b border-border/50 flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            {!inCall ? (
+              <>
+                <button
+                  onClick={() => joinCall('audio')}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white text-xs font-bold rounded-lg transition-all"
+                >
+                  <PhoneCall className="w-3.5 h-3.5" /> Voice
+                </button>
+                <button
+                  onClick={() => joinCall('video')}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-green-600 hover:bg-green-500 active:bg-green-700 text-white text-xs font-bold rounded-lg transition-all"
+                >
+                  <Video className="w-3.5 h-3.5" /> Video
+                </button>
+              </>
+            ) : (
+              <div className="flex w-full gap-2">
+                <button
+                  onClick={toggleMic}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-white text-xs font-bold rounded-lg transition-all ${micOn ? 'bg-white/10 hover:bg-white/20' : 'bg-red-600 hover:bg-red-500'}`}
+                  title={micOn ? "Mute mic" : "Unmute mic"}
+                >
+                  {micOn ? <Mic className="w-3.5 h-3.5" /> : <MicOff className="w-3.5 h-3.5" />}
+                </button>
+                {callType === 'video' && (
+                  <button
+                    onClick={toggleCam}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-white text-xs font-bold rounded-lg transition-all ${camOn ? 'bg-white/10 hover:bg-white/20' : 'bg-red-600 hover:bg-red-500'}`}
+                    title={camOn ? "Camera off" : "Camera on"}
+                  >
+                    {camOn ? <Video className="w-3.5 h-3.5" /> : <VideoOff className="w-3.5 h-3.5" />}
+                  </button>
+                )}
+                <button
+                  onClick={leaveCall}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-red-600 hover:bg-red-500 active:bg-red-700 text-white text-xs font-bold rounded-lg transition-all"
+                >
+                  <PhoneOff className="w-3.5 h-3.5" /> Leave
+                </button>
+              </div>
+            )}
+          </div>
+          {/* Media access error */}
+          {mediaError && (
+            <div className="flex items-start gap-2 p-2 rounded-lg bg-red-950/60 border border-red-500/30">
+              <MicOff className="w-3.5 h-3.5 text-red-400 flex-shrink-0 mt-0.5" />
+              <p className="text-red-300 text-[11px] leading-snug">{mediaError}</p>
               <button
-                onClick={() => joinCall('audio')}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-all"
+                onClick={() => setMediaError(null)}
+                className="ml-auto flex-shrink-0 text-red-400 hover:text-red-200"
               >
-                <PhoneCall className="w-3.5 h-3.5" /> Voice
+                <X className="w-3 h-3" />
               </button>
-              <button
-                onClick={() => joinCall('video')}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded-lg transition-all"
-              >
-                <Video className="w-3.5 h-3.5" /> Video
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={leaveCall}
-              className="w-full flex items-center justify-center gap-1.5 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-lg transition-all"
-            >
-              <PhoneOff className="w-3.5 h-3.5" /> End Call
-            </button>
+            </div>
           )}
         </div>
 

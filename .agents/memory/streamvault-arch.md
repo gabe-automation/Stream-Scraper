@@ -27,3 +27,19 @@ description: Key decisions and gotchas for the StreamVault private streaming app
 ## Content
 - TMDB API key stored as secret `TMDB_API_KEY`
 - Embed URL pattern: `https://vidsrc.to/embed/movie/{id}` or `.../tv/{id}/{season}/{episode}`
+
+## Presence / chat join-leave design
+- Join/leave system messages are NOT persisted to DB — they are ephemeral socket events only.
+- Server (`socket.ts`) has an 8-second grace period on disconnect: if the same user rejoins within 8s, the leave is cancelled silently (no broadcast). This absorbs Clerk auth refreshes and network blips.
+- Client (`WatchRoomPage.tsx`) generates transient system chat bubbles from `user-joined`/`user-left` socket events — they appear in chat but are never loaded from DB history.
+
+**Why:** Without this, every Clerk token refresh caused a disconnect+reconnect cycle → "X joined / X left / X joined" spam in chat and DB bloat.
+
+## Call UI
+- Floating PiP panel: stacked 180px-wide tiles (112px tall each), bottom-right corner.
+- In-call sidebar controls: mic/cam toggles + Leave button (replaces the Voice/Video join buttons).
+- Media access errors shown inline (not alert()) — `mediaError` state, dismissable.
+
+## RoomsPage delete
+- Delete button is a hover-reveal trash icon overlaid on the card (top-right), visible only to the room host.
+- Card outer is now a `<div>` wrapping a `<Link>` so the delete `<button>` can sit outside the link without nesting interactive elements.

@@ -1,57 +1,109 @@
 import { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Users, MonitorPlay, Plus, Film, Tv, Clock, Loader2, Search } from "lucide-react";
-import { useListRooms, useGetMe, Room } from "@workspace/api-client-react";
+import { Users, MonitorPlay, Plus, Film, Tv, Clock, Loader2, Trash2 } from "lucide-react";
+import { useListRooms, useGetMe, useDeleteRoom, Room } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { withAuthGuard } from "../components/layout/withAuthGuard";
 
-function RoomCard({ room }: { room: Room }) {
+function RoomCard({
+  room,
+  currentUserId,
+  onDelete,
+}: {
+  room: Room;
+  currentUserId?: string;
+  onDelete: (id: string) => void;
+}) {
   const posterUrl = room.contentPoster ? `https://image.tmdb.org/t/p/w500${room.contentPoster}` : null;
-  const timeStr = new Date(room.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const isOwner = !!currentUserId && currentUserId === room.hostId;
 
   return (
-    <Link href={`/rooms/${room.id}`} className="group relative rounded-xl overflow-hidden bg-card border border-border/50 flex flex-col hover:border-primary/50 transition-all hover:-translate-y-1 shadow-lg">
-      <div className="aspect-video bg-secondary relative overflow-hidden">
-        {posterUrl ? (
-          <img src={posterUrl} alt={room.contentTitle} className="w-full h-full object-cover opacity-60 group-hover:opacity-80 transition-opacity" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            {room.contentType === 'movie' ? <Film className="w-8 h-8 text-muted-foreground/50" /> : <Tv className="w-8 h-8 text-muted-foreground/50" />}
+    <div className="group relative rounded-xl overflow-hidden bg-card border border-border/50 flex flex-col hover:border-primary/50 transition-all hover:-translate-y-1 shadow-lg">
+      <Link href={`/rooms/${room.id}`} className="flex flex-col flex-1">
+        <div className="aspect-video bg-secondary relative overflow-hidden">
+          {posterUrl ? (
+            <img
+              src={posterUrl}
+              alt={room.contentTitle}
+              className="w-full h-full object-cover opacity-60 group-hover:opacity-80 transition-opacity"
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center">
+              {room.contentType === "movie" ? (
+                <Film className="w-8 h-8 text-muted-foreground/50" />
+              ) : (
+                <Tv className="w-8 h-8 text-muted-foreground/50" />
+              )}
+            </div>
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
+          <div className="absolute bottom-3 left-3 right-3">
+            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-primary/20 text-primary border border-primary/20 mb-2 inline-block">
+              {room.contentType}
+            </span>
+            <h3 className="font-bold text-white line-clamp-1 leading-tight text-lg">{room.contentTitle}</h3>
           </div>
-        )}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
-        <div className="absolute bottom-3 left-3 right-3">
-          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-primary/20 text-primary border border-primary/20 mb-2 inline-block">
-            {room.contentType}
-          </span>
-          <h3 className="font-bold text-white line-clamp-1 leading-tight text-lg shadow-black text-shadow">{room.contentTitle}</h3>
         </div>
-      </div>
-      
-      <div className="p-4 flex-1 flex flex-col justify-between gap-4">
-        <div>
-          <h4 className="font-medium text-foreground line-clamp-1">{room.name}</h4>
-          <p className="text-sm text-muted-foreground mt-1 flex items-center gap-1">
-            <Clock className="w-3 h-3" /> Hosted by {room.hostName}
-          </p>
-        </div>
-        
-        <div className="flex items-center justify-between mt-auto">
-          <div className="flex items-center gap-1.5 text-sm text-muted-foreground bg-secondary px-2 py-1 rounded-md">
-            <Users className="w-4 h-4" />
-            <span className="font-medium">{room.memberCount}</span>
+
+        <div className="p-4 flex-1 flex flex-col justify-between gap-4">
+          <div>
+            <h4 className="font-medium text-foreground line-clamp-1">{room.name}</h4>
+            <p className="text-sm text-muted-foreground mt-1 flex items-center gap-1">
+              <Clock className="w-3 h-3" /> Hosted by {room.hostName}
+            </p>
           </div>
-          <span className="text-primary font-bold text-sm group-hover:underline underline-offset-4">
-            Join Room →
-          </span>
+
+          <div className="flex items-center justify-between mt-auto">
+            <div className="flex items-center gap-1.5 text-sm text-muted-foreground bg-secondary px-2 py-1 rounded-md">
+              <Users className="w-4 h-4" />
+              <span className="font-medium">{room.memberCount}</span>
+            </div>
+            <span className="text-primary font-bold text-sm group-hover:underline underline-offset-4">
+              Join Room →
+            </span>
+          </div>
         </div>
-      </div>
-    </Link>
+      </Link>
+
+      {/* Delete button — only shown to the room host */}
+      {isOwner && (
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onDelete(room.id);
+          }}
+          className="absolute top-2 right-2 z-10 p-1.5 rounded-lg bg-black/60 hover:bg-red-600 text-white/70 hover:text-white border border-white/10 hover:border-red-500 transition-all backdrop-blur-sm opacity-0 group-hover:opacity-100"
+          title="Delete room"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      )}
+    </div>
   );
 }
 
 function RoomsPageContent() {
   const [, setLocation] = useLocation();
+  const queryClient = useQueryClient();
   const { data: rooms, isLoading } = useListRooms({ query: { refetchInterval: 10000 } });
+  const { data: me } = useGetMe();
+  const deleteRoomMutation = useDeleteRoom();
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const handleDelete = (roomId: string) => {
+    if (!confirm("Delete this room? All members will be kicked out.")) return;
+    setDeletingId(roomId);
+    deleteRoomMutation.mutate(
+      { id: roomId },
+      {
+        onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: ["listRooms"] });
+        },
+        onSettled: () => setDeletingId(null),
+      },
+    );
+  };
 
   return (
     <div className="container mx-auto px-4 lg:px-8 py-8 md:py-12 pb-24">
@@ -60,7 +112,10 @@ function RoomsPageContent() {
           <h1 className="text-3xl font-bold tracking-tight mb-2">Watch Rooms</h1>
           <p className="text-muted-foreground">Join an active watch party or start your own.</p>
         </div>
-        <Link href="/browse" className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground font-bold rounded-lg hover:bg-primary/90 transition-colors shadow-lg">
+        <Link
+          href="/browse"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground font-bold rounded-lg hover:bg-primary/90 transition-colors shadow-lg"
+        >
           <Plus className="w-5 h-5" />
           Create Room
         </Link>
@@ -68,7 +123,7 @@ function RoomsPageContent() {
 
       {isLoading ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-          {[1,2,3,4].map(i => (
+          {[1, 2, 3, 4].map((i) => (
             <div key={i} className="rounded-xl overflow-hidden bg-card border border-border/50 h-72 animate-pulse">
               <div className="h-36 bg-secondary" />
               <div className="p-4 space-y-3">
@@ -84,8 +139,14 @@ function RoomsPageContent() {
         </div>
       ) : rooms && rooms.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-          {rooms.map(room => (
-            <RoomCard key={room.id} room={room} />
+          {rooms.map((room) => (
+            <div key={room.id} className={deletingId === room.id ? "opacity-50 pointer-events-none" : ""}>
+              <RoomCard
+                room={room}
+                currentUserId={me?.id}
+                onDelete={handleDelete}
+              />
+            </div>
           ))}
         </div>
       ) : (
@@ -97,7 +158,10 @@ function RoomsPageContent() {
           <p className="text-muted-foreground max-w-sm mb-6">
             There are no watch parties happening right now. Be the first to start one!
           </p>
-          <Link href="/browse" className="inline-flex items-center gap-2 px-6 py-3 bg-foreground text-background font-bold rounded-lg hover:bg-foreground/90 transition-colors">
+          <Link
+            href="/browse"
+            className="inline-flex items-center gap-2 px-6 py-3 bg-foreground text-background font-bold rounded-lg hover:bg-foreground/90 transition-colors"
+          >
             Browse Content
           </Link>
         </div>
