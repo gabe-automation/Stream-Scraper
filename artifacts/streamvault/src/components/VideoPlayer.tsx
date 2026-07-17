@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react";
-import { X, ServerCrash, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { X, RefreshCw, ChevronRight, Loader2, AlertTriangle } from "lucide-react";
 
 // ─── Server definitions ───────────────────────────────────────────────────────
 
@@ -8,54 +8,57 @@ export type ContentType = "movie" | "tv";
 interface ServerDef {
   id: string;
   name: string;
-  getUrl: (
-    type: ContentType,
-    id: string,
-    season?: number,
-    episode?: number,
-  ) => string;
+  getUrl: (type: ContentType, id: string, season?: number, episode?: number) => string;
 }
 
 const SERVERS: ServerDef[] = [
   {
     id: "vidsrc",
-    name: "Server 1",
-    getUrl: (type, id, season, episode) =>
-      type === "movie"
+    name: "VidSrc",
+    getUrl: (t, id, s, e) =>
+      t === "movie"
         ? `https://vidsrc.to/embed/movie/${id}`
-        : `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`,
+        : `https://vidsrc.to/embed/tv/${id}/${s}/${e}`,
   },
   {
     id: "vidsrcme",
-    name: "Server 2",
-    getUrl: (type, id, season, episode) =>
-      type === "movie"
+    name: "VidSrc.me",
+    getUrl: (t, id, s, e) =>
+      t === "movie"
         ? `https://vidsrc.me/embed/movie?tmdb=${id}`
-        : `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+        : `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}`,
   },
   {
-    id: "2embed",
-    name: "Server 3",
-    getUrl: (type, id, season, episode) =>
-      type === "movie"
-        ? `https://www.2embed.cc/embed/${id}`
-        : `https://www.2embed.cc/embedtv/${id}&s=${season}&e=${episode}`,
+    id: "autoembed",
+    name: "AutoEmbed",
+    getUrl: (t, id, s, e) =>
+      t === "movie"
+        ? `https://autoembed.cc/movie/tmdb/${id}`
+        : `https://autoembed.cc/tv/tmdb/${id}-${s}-${e}`,
   },
   {
-    id: "vidsrcpro",
-    name: "Server 4",
-    getUrl: (type, id, season, episode) =>
-      type === "movie"
-        ? `https://vidsrc.pro/embed/movie/${id}`
-        : `https://vidsrc.pro/embed/tv/${id}/${season}/${episode}`,
+    id: "multiembed",
+    name: "MultiEmbed",
+    getUrl: (t, id, s, e) =>
+      t === "movie"
+        ? `https://multiembed.mov/?video_id=${id}&tmdb=1`
+        : `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${s}&e=${e}`,
   },
   {
     id: "embedsu",
-    name: "Server 5",
-    getUrl: (type, id, season, episode) =>
-      type === "movie"
+    name: "Embed.su",
+    getUrl: (t, id, s, e) =>
+      t === "movie"
         ? `https://embed.su/embed/movie/${id}`
-        : `https://embed.su/embed/tv/${id}/${season}/${episode}`,
+        : `https://embed.su/embed/tv/${id}/${s}/${e}`,
+  },
+  {
+    id: "smashystream",
+    name: "Smashy",
+    getUrl: (t, id, s, e) =>
+      t === "movie"
+        ? `https://embed.smashystream.com/playere.php?tmdb=${id}`
+        : `https://embed.smashystream.com/playere.php?tmdb=${id}&season=${s}&episode=${e}`,
   },
 ];
 
@@ -70,115 +73,133 @@ interface VideoPlayerProps {
   onClose: () => void;
 }
 
-export function VideoPlayer({
-  type,
-  id,
-  season,
-  episode,
-  label,
-  onClose,
-}: VideoPlayerProps) {
+export function VideoPlayer({ type, id, season, episode, label, onClose }: VideoPlayerProps) {
   const [serverIdx, setServerIdx] = useState(0);
-  const [iframeKey, setIframeKey] = useState(0); // force reload when server changes
+  const [iframeKey, setIframeKey] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [showBar, setShowBar] = useState(true);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const currentServer = SERVERS[serverIdx];
-  const embedUrl = currentServer.getUrl(type, id, season, episode);
+  const server = SERVERS[serverIdx];
+  const embedUrl = server.getUrl(type, id, season, episode);
 
-  const switchServer = useCallback(
-    (idx: number) => {
-      if (idx === serverIdx) {
-        // Same server — force reload
-        setIframeKey((k) => k + 1);
-      } else {
-        setServerIdx(idx);
-        setIframeKey((k) => k + 1);
-      }
-    },
-    [serverIdx],
-  );
+  const switchTo = useCallback((idx: number) => {
+    setLoaded(false);
+    setServerIdx(idx);
+    setIframeKey((k) => k + 1);
+    setShowBar(true);
+  }, []);
 
-  const prevServer = () =>
-    switchServer((serverIdx - 1 + SERVERS.length) % SERVERS.length);
-  const nextServer = () => switchServer((serverIdx + 1) % SERVERS.length);
+  const nextServer = () => switchTo((serverIdx + 1) % SERVERS.length);
+
+  // Auto-hide controls after 4 s of no mouse movement over the player
+  const resetHideTimer = useCallback(() => {
+    setShowBar(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setShowBar(false), 4000);
+  }, []);
+
+  useEffect(() => {
+    resetHideTimer();
+    return () => { if (hideTimer.current) clearTimeout(hideTimer.current); };
+  }, [serverIdx]);
 
   return (
-    <div className="fixed inset-0 z-[100] bg-black flex flex-col">
-      {/* Top bar */}
-      <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-4 py-3 bg-gradient-to-b from-black/80 to-transparent">
-        {/* Left: label */}
-        <div className="flex items-center gap-3">
-          {label && (
-            <span className="text-white/70 text-sm font-medium">{label}</span>
-          )}
-        </div>
-
-        {/* Centre: server selector */}
-        <div className="flex items-center gap-1.5 bg-black/60 backdrop-blur-md border border-white/10 rounded-full px-2 py-1">
-          <button
-            onClick={prevServer}
-            className="p-1 text-white/50 hover:text-white transition-colors"
-            title="Previous server"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-          </button>
-          {SERVERS.map((s, idx) => (
+    <div
+      className="fixed inset-0 z-[100] bg-black flex flex-col"
+      onMouseMove={resetHideTimer}
+    >
+      {/* ── Top chrome (auto-hides) ─────────────────────────── */}
+      <div
+        className={`absolute top-0 left-0 right-0 z-20 transition-opacity duration-300 ${showBar ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+      >
+        <div className="bg-gradient-to-b from-black/95 via-black/60 to-transparent px-4 pt-3 pb-8">
+          <div className="flex items-center gap-3">
+            {/* Close */}
             <button
-              key={s.id}
-              onClick={() => switchServer(idx)}
-              className={`px-3 py-1 rounded-full text-xs font-semibold transition-all ${
-                idx === serverIdx
-                  ? "bg-primary text-primary-foreground shadow-sm"
-                  : "text-white/50 hover:text-white hover:bg-white/10"
-              }`}
+              onClick={onClose}
+              className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0"
             >
-              {s.name}
+              <X className="w-4 h-4" />
             </button>
-          ))}
-          <button
-            onClick={nextServer}
-            className="p-1 text-white/50 hover:text-white transition-colors"
-            title="Next server"
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
 
-        {/* Right: reload + close */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setIframeKey((k) => k + 1)}
-            className="p-2 text-white/60 hover:text-white bg-black/40 hover:bg-black/70 rounded-full transition-all border border-white/10"
-            title="Reload"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
-          <button
-            onClick={onClose}
-            className="p-2 text-white/60 hover:text-white bg-black/40 hover:bg-black/70 rounded-full transition-all border border-white/10"
-            title="Close"
-          >
-            <X className="w-4 h-4" />
-          </button>
+            {/* Title */}
+            {label && (
+              <span className="text-white/80 text-sm font-medium truncate flex-1 min-w-0">
+                {label}
+              </span>
+            )}
+
+            {/* Reload */}
+            <button
+              onClick={() => { setLoaded(false); setIframeKey((k) => k + 1); }}
+              className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0"
+              title="Reload"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* iframe — sandbox blocks popup ads */}
+      {/* ── Loading spinner ─────────────────────────────────── */}
+      {!loaded && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black pointer-events-none">
+          <Loader2 className="w-10 h-10 text-yellow-400 animate-spin" />
+          <p className="text-white/50 text-sm">Loading {server.name}…</p>
+        </div>
+      )}
+
+      {/* ── iframe ──────────────────────────────────────────── */}
       <iframe
         key={iframeKey}
         src={embedUrl}
         allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
         allowFullScreen
-        referrerPolicy="origin"
-        // sandbox blocks window.open() ad popups while keeping scripts/playback
-        sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-pointer-lock allow-autoplay"
+        referrerPolicy="no-referrer"
         className="w-full h-full border-0"
         title="Player"
+        onLoad={() => setLoaded(true)}
       />
 
-      {/* Bottom hint */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/30 text-xs flex items-center gap-1.5 pointer-events-none">
-        <ServerCrash className="w-3 h-3" />
-        If this server doesn't work, try another server above
+      {/* ── Bottom server bar (always visible) ──────────────── */}
+      <div
+        className={`absolute bottom-0 left-0 right-0 z-20 transition-opacity duration-300 ${showBar ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+      >
+        <div className="bg-gradient-to-t from-black/95 via-black/70 to-transparent px-4 pb-4 pt-10">
+          <div className="flex flex-col items-center gap-2">
+            {/* "Not working?" hint */}
+            <div className="flex items-center gap-1.5 text-yellow-400/80 text-xs">
+              <AlertTriangle className="w-3 h-3" />
+              <span>Video not loading? Try a different server</span>
+            </div>
+
+            {/* Server buttons */}
+            <div className="flex items-center gap-2 flex-wrap justify-center">
+              {SERVERS.map((s, idx) => (
+                <button
+                  key={s.id}
+                  onClick={() => switchTo(idx)}
+                  className={`px-4 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                    idx === serverIdx
+                      ? "bg-yellow-400 text-black border-yellow-400 shadow-lg shadow-yellow-400/20"
+                      : "bg-white/5 text-white/70 border-white/10 hover:bg-white/15 hover:text-white hover:border-white/30"
+                  }`}
+                >
+                  {s.name}
+                </button>
+              ))}
+
+              {/* Quick "next" arrow */}
+              <button
+                onClick={nextServer}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-semibold bg-white/10 text-white/70 border border-white/10 hover:bg-white/20 hover:text-white transition-all"
+              >
+                Next <ChevronRight className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
