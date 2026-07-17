@@ -63,42 +63,41 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
 
         // Send current member list to new joiner
         const memberList = Array.from(members.values()).map((m) => ({
-          userId: m.userId,
-          userName: m.userName,
+          id: m.userId,
+          name: m.userName,
           userAvatar: m.userAvatar,
         }));
         socket.emit("room-state", { members: memberList });
 
-        // Save system message
+        // Save system message & broadcast to chat
         try {
+          const sysMsgId = crypto.randomUUID();
+          const sysMsgContent = `${userName} joined the room`;
+
           await db.insert(roomMessagesTable).values({
+            id: sysMsgId,
             roomId,
-            userId,
-            userName,
-            content: `${userName} joined the room`,
+            userId: "system",
+            userName: "System",
+            content: sysMsgContent,
             type: "system",
+          });
+
+          io.to(roomId).emit("chat-message", {
+            id: sysMsgId,
+            roomId,
+            userId: "system",
+            userName: "System",
+            userAvatar: null,
+            content: sysMsgContent,
+            type: "system",
+            createdAt: new Date().toISOString(),
           });
         } catch (err) {
           logger.error({ err }, "Failed to save join message");
         }
 
         logger.info({ roomId, userId, userName }, "User joined room");
-      },
-    );
-
-    socket.on(
-      "sync-state",
-      ({
-        roomId,
-        isPlaying,
-        currentTime,
-      }: {
-        roomId: string;
-        isPlaying: boolean;
-        currentTime: number;
-      }) => {
-        // Broadcast sync state to all other room members
-        socket.to(roomId).emit("sync-state", { isPlaying, currentTime });
       },
     );
 
@@ -167,17 +166,20 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
       },
     );
 
+    // 🌟 WebRTC Signaling (Matches frontend "webrtc-signal" event)
     socket.on(
-      "peer-signal",
+      "webrtc-signal",
       ({
         roomId,
         to,
         from,
+        fromName,
         signal,
       }: {
         roomId: string;
         to: string;
         from: string;
+        fromName: string;
         signal: unknown;
       }) => {
         // Forward WebRTC signal to specific peer
@@ -185,7 +187,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         if (members) {
           const target = members.get(to);
           if (target) {
-            io.to(target.socketId).emit("peer-signal", { from, signal });
+            io.to(target.socketId).emit("webrtc-signal", { from, fromName, signal });
           }
         }
       },
@@ -205,12 +207,28 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         socket.to(roomId).emit("user-left", { userId, userName });
 
         try {
+          const sysMsgId = crypto.randomUUID();
+          const sysMsgContent = `${userName ?? "Someone"} left the room`;
+
           await db.insert(roomMessagesTable).values({
+            id: sysMsgId,
             roomId,
-            userId,
-            userName: userName ?? "Unknown",
-            content: `${userName ?? "Someone"} left the room`,
+            userId: "system",
+            userName: "System",
+            content: sysMsgContent,
             type: "system",
+          });
+
+          // Broadcast leave message to chat
+          io.to(roomId).emit("chat-message", {
+            id: sysMsgId,
+            roomId,
+            userId: "system",
+            userName: "System",
+            userAvatar: null,
+            content: sysMsgContent,
+            type: "system",
+            createdAt: new Date().toISOString(),
           });
         } catch (err) {
           logger.error({ err }, "Failed to save leave message");
