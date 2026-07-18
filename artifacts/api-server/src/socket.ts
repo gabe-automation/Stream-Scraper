@@ -92,6 +92,9 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
           } else {
             members.set(userId, { userId, userName, userAvatar: userAvatar ?? null, socketId: socket.id });
           }
+          // Still notify others so their participant lists stay accurate,
+          // but mark it silent so clients don't print a chat message.
+          socket.to(roomId).emit("user-joined", { userId, userName, silent: true });
           logger.info({ roomId, userId }, "User silently reconnected (within grace period)");
         } else {
           // Genuine new join — add to members and notify the room

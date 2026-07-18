@@ -443,12 +443,13 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       }, 1000);
     });
 
-    s.on("user-joined", ({ userId: uid, userName }: { userId: string; userName: string }) => {
+    s.on("user-joined", ({ userId: uid, userName, silent }: { userId: string; userName: string; silent?: boolean }) => {
       setParticipants((prev) =>
         prev.find((p) => p.id === uid) ? prev : [...prev, { id: uid, name: userName }]
       );
-      // Show transient presence notification in chat (not persisted to DB)
-      if (uid !== userId) {
+      // Show chat notification only for genuine new joins — not silent reconnects
+      // (Clerk auth refreshes reconnect silently and should not spam the chat).
+      if (uid !== userId && !silent) {
         addMessageRef.current({
           id: `presence-join-${uid}-${Date.now()}`,
           roomId,
@@ -1066,6 +1067,22 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
               </button>
             </div>
           )}
+          {/* Sync Play — always visible in sidebar so host can reach it without hovering the video */}
+          <div className="flex items-center gap-2">
+            {isHost ? (
+              <button
+                onClick={startSyncCountdown}
+                className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-blue-700 hover:bg-blue-600 active:bg-blue-800 text-white text-xs font-bold rounded-lg transition-all"
+                title="Sends a 5-second countdown to every participant — everyone presses play at 0"
+              >
+                <Timer className="w-3.5 h-3.5" /> Sync Play
+              </button>
+            ) : (
+              <div className="flex-1 flex items-center justify-center gap-1.5 py-2 text-muted-foreground/50 text-xs rounded-lg border border-border/20 bg-secondary/10 select-none" title="The host can start a sync countdown">
+                <Timer className="w-3.5 h-3.5" /> Sync (host controls)
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Tabs */}

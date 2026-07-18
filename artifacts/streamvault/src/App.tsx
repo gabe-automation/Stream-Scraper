@@ -126,12 +126,30 @@ function AppRouter() {
         <Route path="/" component={HomeRedirect} />
         <Route path="/sign-in/*?">
           <div className="flex min-h-screen bg-grain items-center justify-center pt-16 px-4">
-            <SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} />
+            <SignIn
+              routing="path"
+              path={`${basePath}/sign-in`}
+              signUpUrl={`${basePath}/sign-up`}
+              // Redirect back to the page the user was trying to visit (e.g. an invite room URL).
+              // withAuthGuard appends ?redirect_url=<encoded href> when sending unauthenticated users here.
+              fallbackRedirectUrl={
+                new URLSearchParams(window.location.search).get("redirect_url") ??
+                `${basePath}/browse`
+              }
+            />
           </div>
         </Route>
         <Route path="/sign-up/*?">
           <div className="flex min-h-screen bg-grain items-center justify-center pt-16 px-4">
-            <SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} />
+            <SignUp
+              routing="path"
+              path={`${basePath}/sign-up`}
+              signInUrl={`${basePath}/sign-in`}
+              fallbackRedirectUrl={
+                new URLSearchParams(window.location.search).get("redirect_url") ??
+                `${basePath}/browse`
+              }
+            />
           </div>
         </Route>
         <Route path="/invite/:code" component={InvitePage} />

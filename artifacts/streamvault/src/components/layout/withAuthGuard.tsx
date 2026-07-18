@@ -16,7 +16,10 @@ export function withAuthGuard(Component: React.ComponentType<any>) {
 
     useEffect(() => {
       if (isLoaded && !isSignedIn) {
-        setLocation("/sign-in");
+        // Preserve the full current URL so Clerk can redirect back after sign-in.
+        // e.g. visiting /rooms/abc while signed out → after sign-in → lands in /rooms/abc
+        const redirectTarget = encodeURIComponent(window.location.href);
+        setLocation(`/sign-in?redirect_url=${redirectTarget}`);
       }
     }, [isLoaded, isSignedIn, setLocation]);
 
