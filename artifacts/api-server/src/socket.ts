@@ -254,13 +254,10 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         signal: unknown;
       }) => {
         if (!roomId || !to || !from) return;
-        const members = roomMembers.get(roomId);
-        if (members) {
-          const target = members.get(to);
-          if (target) {
-            io.to(target.socketId).emit("webrtc-signal", { from, fromName, signal });
-          }
-        }
+        // Route via the personal `user:<id>` room that each socket joins on
+        // "identify". This survives Clerk auth-refresh reconnects where
+        // the stored socketId in roomMembers could be momentarily stale.
+        io.to(`user:${to}`).emit("webrtc-signal", { from, fromName, signal });
       },
     );
 

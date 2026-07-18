@@ -42,6 +42,19 @@ description: Key decisions and gotchas for the StreamVault private streaming app
 
 **Why:** Without this, every Clerk token refresh caused a disconnect+reconnect cycle → "X joined / X left / X joined" spam in chat and DB bloat.
 
+## WebRTC call reliability — critical design rules
+
+**Root cause of "both sides non-initiator" bug:** When a user's Clerk JWT expires mid-call, their socket reconnects. The server removes them from `roomCallState` on disconnect (intentional — call peers need to know immediately). Their client preserves `inCall=true` but their call state is gone server-side. When the other user joins the call they get `call-state: []` (empty), so they create NO peer. The first user receives `call-joined` and creates a peer, but if their userId > the joiner's userId (string comparison), they create a non-initiator peer. Both sides end up non-initiator → no signals → no connection.
+
+**Fixes applied:**
+1. `socket "connect"` handler now emits `identify` (joins `user:<id>` room) then checks `inCallRef.current`; if true, destroys stale peers and re-emits `call-joined` to get fresh `call-state`.
+2. `leaveCall` sets `inCallRef.current = false` synchronously (before cleanup) so reconnect logic doesn't re-announce an intentional leave.
+3. `destroyPeerConnection` deletes the peer from `peersRef.current` BEFORE calling `peer.destroy()` — prevents the close-event destroy loop.
+4. Server `webrtc-signal` routes via `io.to(\`user:${to}\`)` (personal identify room) instead of stored `socketId`, which can be momentarily stale during reconnect.
+5. 20s ICE connection timeout per peer — if `peer.on("connect")` never fires, the peer is torn down.
+
+**Initiator selection:** lower userId string wins (`A.id < B.id`). Applied consistently in both `call-joined` and `call-state` handlers. The `webrtc-signal` fallback handler (`if (!conn) create non-initiator`) is correct — if we receive a signal without a peer, the sender is the initiator.
+
 ## Call UI
 - Floating PiP panel: stacked 180px-wide tiles (112px tall each), bottom-right corner.
 - In-call sidebar controls: mic/cam toggles + Leave button (replaces the Voice/Video join buttons).

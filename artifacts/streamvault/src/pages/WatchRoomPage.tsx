@@ -41,6 +41,8 @@ interface PeerConnection {
   userName: string;
   peer: any;
   stream?: MediaStream;
+  connected?: boolean;
+  connectionTimer?: ReturnType<typeof setTimeout>;
 }
 
 function WatchRoomPageContent({ params }: { params: { id: string } }) {
@@ -230,10 +232,24 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       }
     });
 
+    peer.on("connect", () => {
+      const c = peersRef.current.get(peerId);
+      if (c) {
+        c.connected = true;
+        clearTimeout(c.connectionTimer);
+      }
+    });
+
     peer.on("close", () => destroyPeerConnection(peerId));
     peer.on("error", () => destroyPeerConnection(peerId));
 
-    const conn: PeerConnection = { peerId, userName: peerName, peer };
+    // 20-second ICE timeout — if the peer never fires "connect", tear it down
+    const connectionTimer = setTimeout(() => {
+      const c = peersRef.current.get(peerId);
+      if (c && !c.connected) destroyPeerConnection(peerId);
+    }, 20_000);
+
+    const conn: PeerConnection = { peerId, userName: peerName, peer, connectionTimer };
     peersRef.current.set(peerId, conn);
     forcePeerRerender((n) => n + 1);
     return conn;
@@ -243,9 +259,12 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const destroyPeerConnection = useCallback((peerId: string) => {
     const conn = peersRef.current.get(peerId);
     if (conn) {
-      conn.peer.destroy();
+      // Delete from map FIRST — prevents the peer's own "close" event from
+      // re-entering destroyPeerConnection and triggering a destroy loop.
+      clearTimeout(conn.connectionTimer);
       peersRef.current.delete(peerId);
       forcePeerRerender((n) => n + 1);
+      conn.peer.destroy();
     }
   }, []);
 
@@ -297,6 +316,10 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   };
 
   const leaveCall = useCallback(() => {
+    // Synchronously mark as not in call BEFORE any cleanup so reconnect logic
+    // in the socket "connect" handler doesn't try to re-announce the call.
+    inCallRef.current = false;
+    setInCall(false);
     const uid = user?.id;
     if (uid) socketRef.current?.emit("call-left", { roomId, userId: uid });
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -304,8 +327,10 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     setLocalStream(null);
     setCamOn(false);
     setMicOn(false);
-    setInCall(false);
-    peersRef.current.forEach((conn) => conn.peer.destroy());
+    peersRef.current.forEach((conn) => {
+      clearTimeout(conn.connectionTimer);
+      conn.peer.destroy();
+    });
     peersRef.current.clear();
     forcePeerRerender((n) => n + 1);
   }, [roomId, user]);
@@ -352,12 +377,32 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     setSocket(s);
 
     s.on("connect", () => {
+      // Put this socket in a personal room so webrtc-signal routing is
+      // always current even after a Clerk auth-refresh reconnect.
+      s.emit("identify", userId);
       s.emit("join-room", {
         roomId,
         userId,
         userName: user?.fullName || user?.firstName || "Anonymous",
         userAvatar: user?.imageUrl ?? null,
       });
+
+      // If we were mid-call when the socket disconnected (e.g. Clerk JWT
+      // refresh), clean up stale peer objects (their ICE sessions are dead)
+      // and re-announce to get a fresh call-state from the server.
+      if (inCallRef.current) {
+        peersRef.current.forEach((conn) => {
+          clearTimeout(conn.connectionTimer);
+          conn.peer.destroy();
+        });
+        peersRef.current.clear();
+        forcePeerRerender((n) => n + 1);
+        s.emit("call-joined", {
+          roomId,
+          userId,
+          userName: user?.fullName || user?.firstName || "Anonymous",
+        });
+      }
     });
 
     // Full member list on join — also includes who's on a call right now
