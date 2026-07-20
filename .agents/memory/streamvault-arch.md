@@ -60,6 +60,25 @@ description: Key decisions and gotchas for the StreamVault private streaming app
 - In-call sidebar controls: mic/cam toggles + Leave button (replaces the Voice/Video join buttons).
 - Media access errors shown inline (not alert()) — `mediaError` state, dismissable.
 
+## Watch Together — Go Live (host screen share)
+- Host clicks **Go Live** → `getDisplayMedia()` → captures their tab/screen
+- Host emits `watch-start` → server replies with `watch-guests` (current guest list) → host creates initiator SimplePeer for each guest
+- Guests receive `watch-started` → create non-initiator peer → receive host's MediaStream → display in `<video ref={hostStreamVideoRef}>`
+- New guests joining while share is active: server emits `watch-guest-joined` to host so host opens a new peer
+- Host disconnect: server immediately emits `watch-stopped` to room and clears `roomWatchShare`
+- Separate peer map: `watchPeersRef` (distinct from call `peersRef`)
+- Signal routing: `watch-signal` via `user:<id>` personal rooms (same pattern as webrtc-signal)
+- Guest view: no iframe — only the host's WebRTC stream or a "Waiting for host" placeholder
+- Server selector hidden from guests (they watch the stream, not an iframe)
+- `hostSharing` bool included in `room-state` event so late joiners know immediately
+
+## Camera re-enable bug fix
+- Root cause: `<video ref={localVideoRef}>` was conditionally rendered (only when `camOn`). When cam toggled off→on, element remounted but `localStream` ref hadn't changed so `useEffect([localStream])` didn't re-run → `srcObject` never set on the fresh element.
+- Fix: always render the `<video>` element when `inCall`; hide it with `className={...hidden}` when `camOn` is false. `srcObject` stays assigned across toggle cycles.
+
+## Servers
+10 embed servers: VidSrc, VidSrc.me, VidSrc.xyz, AutoEmbed, 2Embed, MultiEmbed, Embed.su, Smashy, Rive, VidLink
+
 ## RoomsPage delete
 - Delete button is a hover-reveal trash icon overlaid on the card (top-right), visible only to the room host.
 - Card outer is now a `<div>` wrapping a `<Link>` so the delete `<button>` can sit outside the link without nesting interactive elements.

@@ -14,7 +14,8 @@ import {
   Loader2, Send, Users, MessageSquare, LogOut,
   RefreshCw, ChevronRight, AlertTriangle, Info, Copy, Check, X,
   Video, VideoOff, Mic, MicOff, PhoneCall, PhoneOff, Settings, Timer,
-  Maximize, Minimize, PanelRightClose, PanelRightOpen
+  Maximize, Minimize, PanelRightClose, PanelRightOpen, Cast, MonitorOff,
+  Radio
 } from "lucide-react";
 
 // ─── Server definitions ───────────────────────────────────────────────────────
@@ -26,12 +27,16 @@ interface ServerDef {
 }
 
 const SERVERS: ServerDef[] = [
-  { id: "vidsrc", name: "VidSrc", getUrl: (t, id, s, e) => t === "movie" ? `https://vidsrc.to/embed/movie/${id}` : `https://vidsrc.to/embed/tv/${id}/${s}/${e}` },
-  { id: "vidsrcme", name: "VidSrc.me", getUrl: (t, id, s, e) => t === "movie" ? `https://vidsrc.me/embed/movie?tmdb=${id}` : `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
-  { id: "autoembed", name: "AutoEmbed", getUrl: (t, id, s, e) => t === "movie" ? `https://autoembed.cc/movie/tmdb/${id}` : `https://autoembed.cc/tv/tmdb/${id}-${s}-${e}` },
-  { id: "multiembed", name: "MultiEmbed", getUrl: (t, id, s, e) => t === "movie" ? `https://multiembed.mov/?video_id=${id}&tmdb=1` : `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${s}&e=${e}` },
-  { id: "embedsu", name: "Embed.su", getUrl: (t, id, s, e) => t === "movie" ? `https://embed.su/embed/movie/${id}` : `https://embed.su/embed/tv/${id}/${s}/${e}` },
-  { id: "smashystream", name: "Smashy", getUrl: (t, id, s, e) => t === "movie" ? `https://embed.smashystream.com/playere.php?tmdb=${id}` : `https://embed.smashystream.com/playere.php?tmdb=${id}&season=${s}&episode=${e}` },
+  { id: "vidsrc",      name: "VidSrc",     getUrl: (t, id, s, e) => t === "movie" ? `https://vidsrc.to/embed/movie/${id}` : `https://vidsrc.to/embed/tv/${id}/${s}/${e}` },
+  { id: "vidsrcme",    name: "VidSrc.me",  getUrl: (t, id, s, e) => t === "movie" ? `https://vidsrc.me/embed/movie?tmdb=${id}` : `https://vidsrc.me/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
+  { id: "vidsrcxyz",   name: "VidSrc.xyz", getUrl: (t, id, s, e) => t === "movie" ? `https://vidsrc.xyz/embed/movie?tmdb=${id}` : `https://vidsrc.xyz/embed/tv?tmdb=${id}&season=${s}&episode=${e}` },
+  { id: "autoembed",   name: "AutoEmbed",  getUrl: (t, id, s, e) => t === "movie" ? `https://autoembed.cc/movie/tmdb/${id}` : `https://autoembed.cc/tv/tmdb/${id}-${s}-${e}` },
+  { id: "2embed",      name: "2Embed",     getUrl: (t, id, s, e) => t === "movie" ? `https://www.2embed.cc/embed/${id}` : `https://www.2embed.cc/embedtv/${id}&s=${s}&e=${e}` },
+  { id: "multiembed",  name: "MultiEmbed", getUrl: (t, id, s, e) => t === "movie" ? `https://multiembed.mov/?video_id=${id}&tmdb=1` : `https://multiembed.mov/?video_id=${id}&tmdb=1&s=${s}&e=${e}` },
+  { id: "embedsu",     name: "Embed.su",   getUrl: (t, id, s, e) => t === "movie" ? `https://embed.su/embed/movie/${id}` : `https://embed.su/embed/tv/${id}/${s}/${e}` },
+  { id: "smashystream",name: "Smashy",     getUrl: (t, id, s, e) => t === "movie" ? `https://embed.smashystream.com/playere.php?tmdb=${id}` : `https://embed.smashystream.com/playere.php?tmdb=${id}&season=${s}&episode=${e}` },
+  { id: "rive",        name: "Rive",       getUrl: (t, id, s, e) => t === "movie" ? `https://rivestream.live/embed?type=movie&id=${id}` : `https://rivestream.live/embed?type=tv&id=${id}&season=${s}&episode=${e}` },
+  { id: "vidlink",     name: "VidLink",    getUrl: (t, id, s, e) => t === "movie" ? `https://vidlink.pro/movie/${id}` : `https://vidlink.pro/tv/${id}/${s}/${e}` },
 ];
 
 const EMOJIS = ["😂", "😱", "❤️", "👏", "🔥", "🎬"];
@@ -166,6 +171,16 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
 
+  // ----- Watch Stream State (host → guests live screen share) -----
+  const [isSharing, setIsSharing] = useState(false);
+  const isSharingRef = useRef(false);
+  useEffect(() => { isSharingRef.current = isSharing; }, [isSharing]);
+  const [hostIsSharing, setHostIsSharing] = useState(false);
+  const [hostStream, setHostStream] = useState<MediaStream | null>(null);
+  const displayStreamRef = useRef<MediaStream | null>(null);
+  const watchPeersRef = useRef<Map<string, any>>(new Map());
+  const hostStreamVideoRef = useRef<HTMLVideoElement>(null);
+
   // Who is currently on a call — visible to everyone in the room, not just callers
   const [activeCallers, setActiveCallers] = useState<{ id: string; name: string }[]>([]);
 
@@ -178,9 +193,20 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     }
   }, [localStream]);
 
-  // Stop media on unmount
   useEffect(() => {
-    return () => { localStreamRef.current?.getTracks().forEach((t) => t.stop()); };
+    if (hostStreamVideoRef.current && hostStream) {
+      hostStreamVideoRef.current.srcObject = hostStream;
+      hostStreamVideoRef.current.play().catch(() => {});
+    }
+  }, [hostStream]);
+
+  // Stop media + watch peers on unmount
+  useEffect(() => {
+    return () => {
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      displayStreamRef.current?.getTracks().forEach((t) => t.stop());
+      watchPeersRef.current.forEach((p) => { try { p.destroy(); } catch {} });
+    };
   }, []);
 
   // ---------------------------------------------------------------------
@@ -268,6 +294,65 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     }
   }, []);
 
+  // ----- Watch Stream Peers (host captures screen → guests receive WebRTC stream) -----
+  const ICE_SERVERS = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:global.stun.twilio.com:3478" },
+    { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  ];
+
+  const createWatchPeer = useCallback((peerId: string, initiator: boolean) => {
+    if (watchPeersRef.current.has(peerId)) return watchPeersRef.current.get(peerId);
+    const peer = new SimplePeer({
+      initiator,
+      trickle: true,
+      stream: initiator ? (displayStreamRef.current || undefined) : undefined,
+      config: { iceServers: ICE_SERVERS },
+    });
+    peer.on("signal", (signal: any) => {
+      const uid = user?.id;
+      if (!uid) return;
+      socketRef.current?.emit("watch-signal", { roomId, to: peerId, from: uid, signal });
+    });
+    peer.on("stream", (stream: MediaStream) => { setHostStream(stream); });
+    peer.on("track", (_t: any, stream: MediaStream) => { if (stream) setHostStream(stream); });
+    peer.on("close", () => { watchPeersRef.current.delete(peerId); if (!initiator) setHostStream(null); });
+    peer.on("error", () => { watchPeersRef.current.delete(peerId); if (!initiator) setHostStream(null); });
+    watchPeersRef.current.set(peerId, peer);
+    return peer;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, user]);
+
+  const stopWatchShare = useCallback(() => {
+    isSharingRef.current = false;
+    setIsSharing(false);
+    displayStreamRef.current?.getTracks().forEach((t) => t.stop());
+    displayStreamRef.current = null;
+    watchPeersRef.current.forEach((p) => { try { p.destroy(); } catch {} });
+    watchPeersRef.current.clear();
+    socketRef.current?.emit("watch-stop", { roomId, userId: user?.id });
+  }, [roomId, user]);
+
+  const startWatchShare = useCallback(async () => {
+    try {
+      const stream = await (navigator.mediaDevices as any).getDisplayMedia({
+        video: { frameRate: { ideal: 30, max: 30 } },
+        audio: { echoCancellation: false, noiseSuppression: false },
+      });
+      displayStreamRef.current = stream;
+      isSharingRef.current = true;
+      setIsSharing(true);
+      // If user stops via browser's "Stop sharing" button
+      stream.getVideoTracks()[0].addEventListener("ended", () => stopWatchShare());
+      socketRef.current?.emit("watch-start", { roomId, userId: user?.id });
+    } catch {
+      // User cancelled the picker or denied permission — silent
+    }
+  }, [roomId, stopWatchShare, user]);
+
   // Stable callback refs — keep the socket effect deps to [userId, roomId] only.
   // Without this, Clerk refreshing the user object creates a new `createPeerConnection`
   // identity, which tears down the socket mid-call.
@@ -275,10 +360,14 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const createPeerRef = useRef(createPeerConnection);
   const destroyPeerRef = useRef(destroyPeerConnection);
   const switchToRef = useRef(switchTo);
+  const createWatchPeerRef = useRef(createWatchPeer);
+  const stopWatchShareRef = useRef(stopWatchShare);
   useEffect(() => { addMessageRef.current = addMessage; }, [addMessage]);
   useEffect(() => { createPeerRef.current = createPeerConnection; }, [createPeerConnection]);
   useEffect(() => { destroyPeerRef.current = destroyPeerConnection; }, [destroyPeerConnection]);
   useEffect(() => { switchToRef.current = switchTo; }, [switchTo]);
+  useEffect(() => { createWatchPeerRef.current = createWatchPeer; }, [createWatchPeer]);
+  useEffect(() => { stopWatchShareRef.current = stopWatchShare; }, [stopWatchShare]);
 
   const joinCall = async (type: 'audio' | 'video') => {
     setMediaError(null);
@@ -406,12 +495,14 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     });
 
     // Full member list on join — also includes who's on a call right now
-    s.on("room-state", ({ members, callers = [] }: {
+    s.on("room-state", ({ members, callers = [], hostSharing = false }: {
       members: { id: string; name: string; userAvatar: string | null }[];
       callers: { id: string; name: string }[];
+      hostSharing?: boolean;
     }) => {
       setParticipants(members.filter((m) => m.id !== userId));
       setActiveCallers(callers.filter((c) => c.id !== userId));
+      setHostIsSharing(hostSharing);
     });
 
     // Host deleted the room — kick everyone back to the rooms list
@@ -515,6 +606,44 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       }
     });
 
+    // ── Watch Stream events ──────────────────────────────────────────────────
+    // Host started sharing — guests create a non-initiator peer to receive
+    s.on("watch-started", ({ hostId }: { hostId: string }) => {
+      setHostIsSharing(true);
+      if (userId === hostId) return;
+      createWatchPeerRef.current(hostId, false);
+    });
+
+    // Host stopped sharing
+    s.on("watch-stopped", () => {
+      setHostIsSharing(false);
+      setHostStream(null);
+      watchPeersRef.current.forEach((p) => { try { p.destroy(); } catch {} });
+      watchPeersRef.current.clear();
+    });
+
+    // Server replies with current guests list after host emits watch-start
+    s.on("watch-guests", ({ guests }: { guests: { id: string }[] }) => {
+      guests.forEach(({ id: guestId }) => {
+        if (guestId === userId) return;
+        createWatchPeerRef.current(guestId, true);
+      });
+    });
+
+    // A new guest joined while the host is already sharing — host connects to them
+    s.on("watch-guest-joined", ({ userId: guestId }: { userId: string }) => {
+      if (!displayStreamRef.current) return;
+      createWatchPeerRef.current(guestId, true);
+    });
+
+    // WebRTC signal for watch stream
+    s.on("watch-signal", ({ from, signal }: { from: string; signal: any }) => {
+      let peer = watchPeersRef.current.get(from);
+      if (!peer) peer = createWatchPeerRef.current(from, false);
+      try { peer.signal(signal); } catch { /* stale signal */ }
+    });
+    // ────────────────────────────────────────────────────────────────────────
+
     // WebRTC signaling relay
     s.on("webrtc-signal", ({ from, fromName, signal }: { from: string; fromName: string; signal: any }) => {
       if (!localStreamRef.current) return;
@@ -533,6 +662,9 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       socketRef.current = null;
       peersRef.current.forEach((conn) => conn.peer.destroy());
       peersRef.current.clear();
+      watchPeersRef.current.forEach((p) => { try { p.destroy(); } catch {} });
+      watchPeersRef.current.clear();
+      stopWatchShareRef.current();
     };
   // Only re-run when the actual user identity or room changes — not on every callback re-creation
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -623,24 +755,62 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       {/* Main Video Area */}
       <div ref={playerAreaRef} className="flex-1 flex flex-col relative bg-black border-r border-border/50" onMouseMove={resetHideTimer}>
         <div className="flex-1 relative w-full h-full">
-          {!loaded && (
-            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black pointer-events-none">
-              <Loader2 className="w-10 h-10 text-yellow-400 animate-spin" />
-              <p className="text-white/50 text-sm">Loading {server.name}…</p>
-            </div>
+          {/* ── Host: real iframe player ── */}
+          {isHost && (
+            <>
+              {!loaded && (
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-black pointer-events-none">
+                  <Loader2 className="w-10 h-10 text-yellow-400 animate-spin" />
+                  <p className="text-white/50 text-sm">Loading {server.name}…</p>
+                </div>
+              )}
+              <iframe
+                key={iframeKey}
+                src={embedUrl}
+                allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups"
+                allowFullScreen
+                referrerPolicy="no-referrer"
+                className="w-full h-full border-0 absolute inset-0 z-0"
+                title="Watch Party Player"
+                onLoad={() => setLoaded(true)}
+              />
+            </>
           )}
 
-          <iframe
-            key={iframeKey}
-            src={embedUrl}
-            allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups"
-            allowFullScreen
-            referrerPolicy="no-referrer"
-            className="w-full h-full border-0 absolute inset-0 z-0"
-            title="Watch Party Player"
-            onLoad={() => setLoaded(true)}
-          />
+          {/* ── Guest: host's live WebRTC stream ── */}
+          {!isHost && (
+            <div className="absolute inset-0 z-0 flex items-center justify-center bg-black">
+              {/* Stream received — show video */}
+              <video
+                ref={hostStreamVideoRef}
+                autoPlay
+                playsInline
+                className={`w-full h-full object-contain${!hostStream ? ' hidden' : ''}`}
+              />
+              {/* No stream yet */}
+              {!hostStream && (
+                <div className="flex flex-col items-center gap-4 text-center px-6">
+                  {hostIsSharing ? (
+                    <>
+                      <Loader2 className="w-8 h-8 text-yellow-400 animate-spin" />
+                      <p className="text-white/60 text-sm">Connecting to host's stream…</p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-20 h-20 rounded-full bg-yellow-400/10 flex items-center justify-center mb-1">
+                        <Cast className="w-9 h-9 text-yellow-400/50" />
+                      </div>
+                      <p className="text-white/80 font-bold text-xl">Waiting for host</p>
+                      <p className="text-white/40 text-sm max-w-xs leading-relaxed">
+                        {room.hostName} needs to press <span className="text-yellow-400 font-semibold">Go Live</span> to start streaming the video to everyone
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Top Bar Overlay */}
           <div className={`absolute top-0 inset-x-0 z-20 transition-opacity duration-300 pointer-events-none ${showBar ? "opacity-100" : "opacity-0"}`}>
@@ -657,6 +827,23 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                 {/* Host-only controls */}
                 {isHost && (
                   <>
+                    {!isSharing ? (
+                      <button
+                        onClick={startWatchShare}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg"
+                        title="Share your screen with all guests"
+                      >
+                        <Cast className="w-3.5 h-3.5" /> Go Live
+                      </button>
+                    ) : (
+                      <button
+                        onClick={stopWatchShare}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-700 hover:bg-red-600 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg animate-pulse"
+                        title="Stop sharing your screen"
+                      >
+                        <MonitorOff className="w-3.5 h-3.5" /> Stop Live
+                      </button>
+                    )}
                     <button
                       onClick={startSyncCountdown}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg"
@@ -666,12 +853,19 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                     </button>
                     <button
                       onClick={handleEndRoom}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-700 hover:bg-red-600 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-700 hover:bg-zinc-600 text-white text-xs font-bold transition-all pointer-events-auto shadow-lg"
                       title="End the watch party for everyone"
                     >
                       End Room
                     </button>
                   </>
+                )}
+
+                {/* Guest: live indicator */}
+                {!isHost && hostIsSharing && (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-600/30 border border-red-500/40 text-red-300 text-xs font-bold pointer-events-none">
+                    <Radio className="w-3 h-3 animate-pulse" /> LIVE
+                  </div>
                 )}
 
                 <button onClick={() => setShowInfo(true)} className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all flex-shrink-0 pointer-events-auto" title="Player Info">
@@ -757,8 +951,8 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
             </div>
           </div>
 
-          {/* Dynamic Server Selector */}
-          {selectorVisible && (
+          {/* Dynamic Server Selector — host only; guests watch the host's stream */}
+          {isHost && selectorVisible && (
             <>
               {selectorPosition === 'bottom' && (
                 <div className={`absolute bottom-0 inset-x-0 z-20 transition-opacity duration-300 pointer-events-none ${showBar ? "opacity-100" : "opacity-0"}`}>
@@ -869,19 +1063,19 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
               {/* Video tiles — stacked vertically */}
               <div className="flex flex-col divide-y divide-white/5">
-                {/* Local tile */}
+                {/* Local tile — always keep <video> mounted when in call so srcObject
+                    stays assigned across cam toggle cycles; only hide it with CSS */}
                 <div className="relative w-full h-[112px] bg-zinc-900">
-                  {callType === 'video' && camOn ? (
-                    <video
-                      ref={localVideoRef}
-                      autoPlay
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover"
-                      style={{ transform: 'scaleX(-1)' }}
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center bg-primary/10">
+                  <video
+                    ref={localVideoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className={`w-full h-full object-cover${callType !== 'video' || !camOn ? ' hidden' : ''}`}
+                    style={{ transform: 'scaleX(-1)' }}
+                  />
+                  {(callType !== 'video' || !camOn) && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-primary/10">
                       <div className="w-10 h-10 rounded-full bg-primary/30 flex items-center justify-center text-white text-base font-bold">
                         {user?.firstName?.charAt(0) || 'Y'}
                       </div>
@@ -948,15 +1142,31 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Because we use secure, third-party video servers (like VidSrc and Smashy), browser security policies prevent external websites from exposing programmatic play/pause controls.
-                </p>
-                <p className="text-sm text-muted-foreground mb-4">
-                  <strong className="text-foreground">How to sync:</strong> The host can press <strong className="text-foreground">Sync Play</strong> to broadcast a 5-second countdown to everyone. When it hits zero, everyone presses play at the same time.
-                </p>
-                <p className="text-sm text-muted-foreground mb-4">
-                  <strong className="text-foreground">Server switching:</strong> If the host switches servers, everyone in the room switches automatically.
-                </p>
+                {isHost ? (
+                  <>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      You're the host. Only you can see and control the video player. Guests see a blank screen until you start sharing.
+                    </p>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      <strong className="text-foreground">Go Live:</strong> Press the red <strong className="text-foreground">Go Live</strong> button to share your screen with everyone in the room. Pick your current browser tab when the picker appears. Guests will see exactly what you see, in real-time.
+                    </p>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      <strong className="text-foreground">Server switching:</strong> If the video doesn't load, switch servers — your view updates immediately and guests see the new stream automatically.
+                    </p>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      <strong className="text-foreground">Sync Play:</strong> Use this to send a 5-second countdown so everyone presses play at the same time.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      You're watching as a guest. The host controls the player — you'll see their stream live once they press <strong className="text-foreground">Go Live</strong>.
+                    </p>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      The stream is sent directly from the host to you via WebRTC — no delay, no buffering. It plays as fast as your connection allows.
+                    </p>
+                  </>
+                )}
                 <button
                   onClick={() => setShowInfo(false)}
                   className="w-full py-2 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors"

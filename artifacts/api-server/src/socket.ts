@@ -17,6 +17,9 @@ const roomMembers = new Map<string, Map<string, RoomMember>>();
 // In-memory call state: roomId → Map<userId, userName>
 const roomCallState = new Map<string, Map<string, string>>();
 
+// Watch stream state: roomId → hostId (host is actively sharing their screen)
+const roomWatchShare = new Map<string, string>();
+
 // Grace-period disconnect timers: "roomId:userId" → timer
 // Absorbs quick reconnects (Clerk auth refreshes, network blips) so users
 // don't see "X joined / X left / X joined" spam in chat.
@@ -103,7 +106,7 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
           logger.info({ roomId, userId, userName }, "User joined room");
         }
 
-        // Send full member + caller state to the (re)joining socket
+        // Send full member + caller state + watch share state to the (re)joining socket
         const memberList = Array.from(members.values()).map((m) => ({
           id: m.userId,
           name: m.userName,
@@ -112,7 +115,16 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         const currentCallers = roomCallState.has(roomId)
           ? Array.from(roomCallState.get(roomId)!.entries()).map(([id, name]) => ({ id, name }))
           : [];
-        socket.emit("room-state", { members: memberList, callers: currentCallers });
+        const watchHostId = roomWatchShare.get(roomId);
+        const hostSharing = !!watchHostId;
+        socket.emit("room-state", { members: memberList, callers: currentCallers, hostSharing });
+
+        // If the host is already sharing and this is a new non-host guest joining,
+        // notify the host to open a watch peer connection to this new guest.
+        if (watchHostId && userId !== watchHostId && !pendingDisconnect) {
+          io.to(`user:${watchHostId}`).emit("watch-guest-joined", { userId });
+          logger.debug({ roomId, userId, watchHostId }, "Notified host of new guest for watch stream");
+        }
       },
     );
 
@@ -132,6 +144,62 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
       ({ roomId, action }: { roomId: string; action: unknown }) => {
         if (!roomId) return;
         socket.to(roomId).emit("host-action", action);
+      },
+    );
+
+    // ─── Watch Stream signaling ─────────────────────────────────────────────
+    // Host starts sharing their screen — register and broadcast to guests.
+    socket.on(
+      "watch-start",
+      ({ roomId, userId }: { roomId: string; userId: string }) => {
+        if (!roomId || !userId) return;
+        roomWatchShare.set(roomId, userId);
+
+        // Tell all guests the host started sharing
+        socket.to(roomId).emit("watch-started", { hostId: userId });
+
+        // Reply to host with all current guests so they can open WebRTC peers
+        const members = roomMembers.get(roomId);
+        const guests = members
+          ? Array.from(members.values())
+              .filter((m) => m.userId !== userId)
+              .map((m) => ({ id: m.userId, name: m.userName }))
+          : [];
+        socket.emit("watch-guests", { guests });
+
+        logger.info({ roomId, userId, guestCount: guests.length }, "Host started watch share");
+      },
+    );
+
+    // Host stops sharing.
+    socket.on(
+      "watch-stop",
+      ({ roomId, userId }: { roomId: string; userId: string }) => {
+        if (!roomId || !userId) return;
+        if (roomWatchShare.get(roomId) === userId) {
+          roomWatchShare.delete(roomId);
+          io.to(roomId).emit("watch-stopped");
+          logger.info({ roomId, userId }, "Host stopped watch share");
+        }
+      },
+    );
+
+    // WebRTC signal for watch stream — route to target user's personal room.
+    socket.on(
+      "watch-signal",
+      ({
+        roomId,
+        to,
+        from,
+        signal,
+      }: {
+        roomId: string;
+        to: string;
+        from: string;
+        signal: unknown;
+      }) => {
+        if (!roomId || !to || !from) return;
+        io.to(`user:${to}`).emit("watch-signal", { from, signal });
       },
     );
 
@@ -281,6 +349,16 @@ export function setupSocket(server: HTTPServer): SocketIOServer {
         if (current?.socketId === socket.id) {
           roomCallState.get(roomId)!.delete(userId);
           io.to(roomId).emit("call-left", { userId });
+        }
+      }
+
+      // Watch share: if host disconnects, immediately stop the share for all guests
+      if (roomWatchShare.get(roomId) === userId) {
+        const current = roomMembers.get(roomId)?.get(userId);
+        if (current?.socketId === socket.id) {
+          roomWatchShare.delete(roomId);
+          io.to(roomId).emit("watch-stopped");
+          logger.info({ roomId, userId }, "Watch share stopped — host disconnected");
         }
       }
 
