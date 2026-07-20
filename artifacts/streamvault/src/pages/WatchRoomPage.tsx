@@ -61,7 +61,8 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const { data: room, isLoading: loadingRoom } = useGetRoom(roomId, { query: { enabled: !!roomId } });
   const deleteRoomMutation = useDeleteRoom();
   const { data: initialMessages } = useGetRoomMessages(roomId, { query: { enabled: !!roomId } });
-  const isHost = room?.hostId === user?.id;
+  // isHost is computed server-side (room.hostId is an internal DB UUID, not a Clerk ID)
+  const isHost = room?.isHost === true;
   const isHostRef = useRef(false);
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
 

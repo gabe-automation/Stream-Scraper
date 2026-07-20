@@ -9,6 +9,7 @@ const router = Router();
 function serializeRoom(
   room: typeof watchRoomsTable.$inferSelect,
   memberCount = 0,
+  currentUserDbId?: string,
 ) {
   return {
     id: room.id,
@@ -19,6 +20,7 @@ function serializeRoom(
     contentPoster: room.contentPoster ?? null,
     hostId: room.hostId,
     hostName: room.hostName,
+    isHost: currentUserDbId !== undefined ? room.hostId === currentUserDbId : undefined,
     memberCount,
     currentTime: room.currentTime,
     isPlaying: room.isPlaying,
@@ -74,7 +76,7 @@ router.post("/", requireAuth, requireApproved, async (req: AuthRequest, res) => 
 });
 
 // GET /api/rooms/:id
-router.get("/:id", requireAuth, requireApproved, async (req, res) => {
+router.get("/:id", requireAuth, requireApproved, async (req: AuthRequest, res) => {
   const roomId = String(req.params.id);
   const room = await db.query.watchRoomsTable.findFirst({
     where: eq(watchRoomsTable.id, roomId),
@@ -85,7 +87,7 @@ router.get("/:id", requireAuth, requireApproved, async (req, res) => {
     return;
   }
 
-  res.json(serializeRoom(room));
+  res.json(serializeRoom(room, 0, req.dbUser!.id));
 });
 
 // DELETE /api/rooms/:id
