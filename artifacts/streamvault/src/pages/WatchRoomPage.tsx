@@ -202,25 +202,26 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     video.srcObject = hostStream;
     video.play().catch(() => {});
 
-    // Live-edge catch-up: WebRTC buffers can slowly drift behind the live edge,
-    // causing lag to build up over time. Every second, if the guest is more than
-    // 400ms behind the buffer's live edge, snap forward. If they're 150–400ms
-    // behind, speed up slightly (1.1×) for a smooth catch-up instead of a jump.
+    // Live-edge catch-up: WebRTC buffers drift behind over time, causing lag to
+    // accumulate. Every 400 ms check where the guest sits relative to the live edge:
+    //   > 250 ms behind → snap to live edge immediately (invisible on motion video)
+    //   100–250 ms      → play at 1.15× to catch up smoothly without a visible jump
+    //   < 100 ms        → normal speed, we're essentially live
     const catchUp = () => {
       if (!video || video.paused || video.buffered.length === 0) return;
       const liveEdge = video.buffered.end(video.buffered.length - 1);
       const lag = liveEdge - video.currentTime;
-      if (lag > 0.4) {
-        video.currentTime = liveEdge - 0.05; // snap to near-live
+      if (lag > 0.25) {
+        video.currentTime = liveEdge - 0.05;
         video.playbackRate = 1.0;
-      } else if (lag > 0.15) {
-        video.playbackRate = 1.1; // gentle speed-up
+      } else if (lag > 0.1) {
+        video.playbackRate = 1.15;
       } else {
         video.playbackRate = 1.0;
       }
     };
 
-    const interval = setInterval(catchUp, 800);
+    const interval = setInterval(catchUp, 400);
     return () => {
       clearInterval(interval);
       video.playbackRate = 1.0;
@@ -331,25 +332,54 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
   ];
 
-  // Prefer VP9 over VP8 in the SDP — VP9 delivers ~30% better quality at the same
-  // bitrate, which translates directly to sharper video for guests.
-  const preferVP9 = (sdp: string): string => {
+  // Combined SDP transform:
+  //  1. Move VP9 to the front of the m=video payload list (better compression than VP8)
+  //  2. Inject Chrome's proprietary bandwidth probe hints so the sender ramps up to a
+  //     usable bitrate immediately instead of spending the first 10–30 s probing upward.
+  //     x-google-start-bitrate=2500  → start at 2.5 Mbps (not the default ~300 kbps)
+  //     x-google-min-bitrate=500     → never drop below 500 kbps
+  //     x-google-max-bitrate=8000    → ceiling matches setParameters below
+  const optimizeSDP = (sdp: string): string => {
     const lines = sdp.split('\r\n');
     const mVideoIdx = lines.findIndex(l => l.startsWith('m=video'));
     if (mVideoIdx === -1) return sdp;
-    const vp9Line = lines.slice(mVideoIdx).find(l => /VP9/i.test(l));
-    if (!vp9Line) return sdp;
-    const pt = vp9Line.match(/a=rtpmap:(\d+)\s+VP9/i)?.[1];
-    if (!pt) return sdp;
-    const mParts = lines[mVideoIdx].split(' ');
-    const payloads = mParts.slice(3);
-    lines[mVideoIdx] = [...mParts.slice(0, 3), pt, ...payloads.filter(p => p !== pt)].join(' ');
+
+    const vp9RtpLine = lines.slice(mVideoIdx).find(l => /a=rtpmap:\d+\s+VP9/i.test(l));
+    const pt = vp9RtpLine?.match(/a=rtpmap:(\d+)\s+VP9/i)?.[1];
+
+    if (pt) {
+      // Re-order m=video to put VP9 first
+      const mParts = lines[mVideoIdx].split(' ');
+      lines[mVideoIdx] = [
+        ...mParts.slice(0, 3),
+        pt,
+        ...mParts.slice(3).filter(p => p !== pt),
+      ].join(' ');
+
+      // Patch or insert fmtp line with bandwidth probe params
+      const bwHints = 'x-google-start-bitrate=2500;x-google-min-bitrate=500;x-google-max-bitrate=8000';
+      const fmtpIdx = lines.findIndex(l => l.startsWith(`a=fmtp:${pt}`));
+      if (fmtpIdx !== -1) {
+        lines[fmtpIdx] += `;${bwHints}`;
+      } else {
+        const rtpmapIdx = lines.findIndex(l => l.startsWith(`a=rtpmap:${pt}`));
+        if (rtpmapIdx !== -1) {
+          lines.splice(rtpmapIdx + 1, 0, `a=fmtp:${pt} profile-id=0;${bwHints}`);
+        }
+      }
+    }
+
     return lines.join('\r\n');
   };
 
-  // After the data channel opens, bump the sender's encoding parameters to
-  // allow high bitrate. Browsers default to ~300kbps which makes video look
-  // pixelated/choppy — 8 Mbps max lets it breathe.
+  // Called once the WebRTC data channel opens (host side only).
+  // Sets encoding constraints that the SDP alone can't express:
+  //   maxBitrate 8 Mbps   — high ceiling so congestion control has room to work
+  //   degradationPreference "maintain-framerate" — on a weak link the browser
+  //     will scale resolution down (e.g. 1080→720→480) rather than drop FPS,
+  //     keeping motion smooth instead of turning into a slideshow
+  //   priority / networkPriority "high" — marks RTP packets as high-priority
+  //     in the OS network stack so they're not queued behind other traffic
   const applyHighBitrateEncoding = async (peer: any) => {
     try {
       const pc = peer._pc as RTCPeerConnection;
@@ -359,13 +389,19 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
           if (sender.track?.kind !== "video") return;
           const params = sender.getParameters();
           if (!params.encodings?.length) params.encodings = [{}];
-          params.encodings[0].maxBitrate    = 8_000_000; // 8 Mbps
-          params.encodings[0].maxFramerate  = 30;
-          params.encodings[0].scaleResolutionDownBy = 1; // no downscaling
+          const enc = params.encodings[0] as any;
+          enc.maxBitrate           = 8_000_000; // 8 Mbps
+          enc.maxFramerate         = 30;
+          enc.degradationPreference = "maintain-framerate";
+          enc.priority             = "high";
+          enc.networkPriority      = "high";
+          // Remove fixed scaleResolutionDownBy so degradationPreference
+          // can adapt resolution freely on constrained links
+          delete enc.scaleResolutionDownBy;
           await sender.setParameters(params);
         })
       );
-    } catch { /* browser may not support all params — safe to ignore */ }
+    } catch { /* safe to ignore — not all browsers support every param */ }
   };
 
   const createWatchPeer = useCallback((peerId: string, initiator: boolean) => {
@@ -374,8 +410,9 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       initiator,
       trickle: true,
       stream: initiator ? (displayStreamRef.current || undefined) : undefined,
-      config: { iceServers: ICE_SERVERS },
-      sdpTransform: preferVP9,
+      // Pre-pool ICE candidates so connection establishes faster
+      config: { iceServers: ICE_SERVERS, iceCandidatePoolSize: 10, bundlePolicy: "max-bundle" } as any,
+      sdpTransform: optimizeSDP,
     });
     peer.on("signal", (signal: any) => {
       const uid = user?.id;
@@ -437,6 +474,12 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
           // Region Capture not available or failed — stream whole tab as fallback
         }
       }
+
+      // contentHint "motion" tells Chrome's encoder to prioritise smooth
+      // framerate over sharp detail — critical on low/medium bandwidth where
+      // the encoder must trade one for the other.
+      stream.getVideoTracks().forEach(t => { (t as any).contentHint = "motion"; });
+      stream.getAudioTracks().forEach(t => { (t as any).contentHint = "speech"; });
 
       displayStreamRef.current = stream;
       isSharingRef.current = true;
