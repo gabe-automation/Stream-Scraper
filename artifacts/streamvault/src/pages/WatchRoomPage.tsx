@@ -196,10 +196,35 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   }, [localStream]);
 
   useEffect(() => {
-    if (hostStreamVideoRef.current && hostStream) {
-      hostStreamVideoRef.current.srcObject = hostStream;
-      hostStreamVideoRef.current.play().catch(() => {});
-    }
+    const video = hostStreamVideoRef.current;
+    if (!video || !hostStream) return;
+
+    video.srcObject = hostStream;
+    video.play().catch(() => {});
+
+    // Live-edge catch-up: WebRTC buffers can slowly drift behind the live edge,
+    // causing lag to build up over time. Every second, if the guest is more than
+    // 400ms behind the buffer's live edge, snap forward. If they're 150–400ms
+    // behind, speed up slightly (1.1×) for a smooth catch-up instead of a jump.
+    const catchUp = () => {
+      if (!video || video.paused || video.buffered.length === 0) return;
+      const liveEdge = video.buffered.end(video.buffered.length - 1);
+      const lag = liveEdge - video.currentTime;
+      if (lag > 0.4) {
+        video.currentTime = liveEdge - 0.05; // snap to near-live
+        video.playbackRate = 1.0;
+      } else if (lag > 0.15) {
+        video.playbackRate = 1.1; // gentle speed-up
+      } else {
+        video.playbackRate = 1.0;
+      }
+    };
+
+    const interval = setInterval(catchUp, 800);
+    return () => {
+      clearInterval(interval);
+      video.playbackRate = 1.0;
+    };
   }, [hostStream]);
 
   // Stop media + watch peers on unmount
@@ -306,6 +331,43 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
     { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
   ];
 
+  // Prefer VP9 over VP8 in the SDP — VP9 delivers ~30% better quality at the same
+  // bitrate, which translates directly to sharper video for guests.
+  const preferVP9 = (sdp: string): string => {
+    const lines = sdp.split('\r\n');
+    const mVideoIdx = lines.findIndex(l => l.startsWith('m=video'));
+    if (mVideoIdx === -1) return sdp;
+    const vp9Line = lines.slice(mVideoIdx).find(l => /VP9/i.test(l));
+    if (!vp9Line) return sdp;
+    const pt = vp9Line.match(/a=rtpmap:(\d+)\s+VP9/i)?.[1];
+    if (!pt) return sdp;
+    const mParts = lines[mVideoIdx].split(' ');
+    const payloads = mParts.slice(3);
+    lines[mVideoIdx] = [...mParts.slice(0, 3), pt, ...payloads.filter(p => p !== pt)].join(' ');
+    return lines.join('\r\n');
+  };
+
+  // After the data channel opens, bump the sender's encoding parameters to
+  // allow high bitrate. Browsers default to ~300kbps which makes video look
+  // pixelated/choppy — 8 Mbps max lets it breathe.
+  const applyHighBitrateEncoding = async (peer: any) => {
+    try {
+      const pc = peer._pc as RTCPeerConnection;
+      if (!pc) return;
+      await Promise.all(
+        pc.getSenders().map(async (sender) => {
+          if (sender.track?.kind !== "video") return;
+          const params = sender.getParameters();
+          if (!params.encodings?.length) params.encodings = [{}];
+          params.encodings[0].maxBitrate    = 8_000_000; // 8 Mbps
+          params.encodings[0].maxFramerate  = 30;
+          params.encodings[0].scaleResolutionDownBy = 1; // no downscaling
+          await sender.setParameters(params);
+        })
+      );
+    } catch { /* browser may not support all params — safe to ignore */ }
+  };
+
   const createWatchPeer = useCallback((peerId: string, initiator: boolean) => {
     if (watchPeersRef.current.has(peerId)) return watchPeersRef.current.get(peerId);
     const peer = new SimplePeer({
@@ -313,12 +375,17 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
       trickle: true,
       stream: initiator ? (displayStreamRef.current || undefined) : undefined,
       config: { iceServers: ICE_SERVERS },
+      sdpTransform: preferVP9,
     });
     peer.on("signal", (signal: any) => {
       const uid = user?.id;
       if (!uid) return;
       socketRef.current?.emit("watch-signal", { roomId, to: peerId, from: uid, signal });
     });
+    // Host side: once connected pump up the encoding bitrate
+    if (initiator) {
+      peer.on("connect", () => { applyHighBitrateEncoding(peer); });
+    }
     peer.on("stream", (stream: MediaStream) => { setHostStream(stream); });
     peer.on("track", (_t: any, stream: MediaStream) => { if (stream) setHostStream(stream); });
     peer.on("close", () => { watchPeersRef.current.delete(peerId); if (!initiator) setHostStream(null); });
@@ -340,10 +407,17 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
   const startWatchShare = useCallback(async () => {
     try {
-      // preferCurrentTab skips the full picker and auto-selects this tab in Chrome
+      // preferCurrentTab skips the full picker and auto-selects this tab in Chrome.
+      // Width/height push the browser to capture at full 1080p so guests get crisp video.
       const stream = await (navigator.mediaDevices as any).getDisplayMedia({
-        video: { frameRate: { ideal: 30, max: 30 }, preferCurrentTab: true },
-        audio: { echoCancellation: false, noiseSuppression: false },
+        video: {
+          frameRate: { ideal: 30, max: 30 },
+          width:     { ideal: 1920, max: 1920 },
+          height:    { ideal: 1080, max: 1080 },
+          preferCurrentTab: true,
+          displaySurface: "browser",
+        },
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         preferCurrentTab: true,
         selfBrowserSurface: "include",
       });
