@@ -70,6 +70,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
   const [serverIdx, setServerIdx] = useState(0);
   const [iframeKey, setIframeKey] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const [showBar, setShowBar] = useState(true);
   const [showInfo, setShowInfo] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -339,18 +340,38 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
 
   const startWatchShare = useCallback(async () => {
     try {
+      // preferCurrentTab skips the full picker and auto-selects this tab in Chrome
       const stream = await (navigator.mediaDevices as any).getDisplayMedia({
-        video: { frameRate: { ideal: 30, max: 30 } },
+        video: { frameRate: { ideal: 30, max: 30 }, preferCurrentTab: true },
         audio: { echoCancellation: false, noiseSuppression: false },
+        preferCurrentTab: true,
+        selfBrowserSurface: "include",
       });
+
+      // Region Capture API — crop the captured tab stream to just the iframe element
+      // so guests only see the player, not the rest of the page.
+      // Supported in Chrome 104+; silently skipped on other browsers.
+      const iframe = iframeRef.current;
+      if (iframe && typeof (window as any).CropTarget !== "undefined") {
+        try {
+          const cropTarget = await (window as any).CropTarget.fromElement(iframe);
+          const [videoTrack] = stream.getVideoTracks();
+          if (videoTrack && typeof videoTrack.cropTo === "function") {
+            await videoTrack.cropTo(cropTarget);
+          }
+        } catch {
+          // Region Capture not available or failed — stream whole tab as fallback
+        }
+      }
+
       displayStreamRef.current = stream;
       isSharingRef.current = true;
       setIsSharing(true);
-      // If user stops via browser's "Stop sharing" button
+      // If user stops via browser's built-in "Stop sharing" bar
       stream.getVideoTracks()[0].addEventListener("ended", () => stopWatchShare());
       socketRef.current?.emit("watch-start", { roomId, userId: user?.id });
     } catch {
-      // User cancelled the picker or denied permission — silent
+      // User cancelled or denied permission — silent
     }
   }, [roomId, stopWatchShare, user]);
 
@@ -766,6 +787,7 @@ function WatchRoomPageContent({ params }: { params: { id: string } }) {
                 </div>
               )}
               <iframe
+                ref={iframeRef}
                 key={iframeKey}
                 src={embedUrl}
                 allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
